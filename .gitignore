@@ -1,0 +1,12 @@
+# built golua binary (rebuilt on demand from the golua checkout)
+**/golua
+
+# grinder output — only divergences land here; never commit them
+**/corpus/*
+!**/corpus/.gitkeep
+
+# run logs / tee output
+**/*.log
+
+__pycache__/
+*.pyc

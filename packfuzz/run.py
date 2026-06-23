@@ -195,9 +195,18 @@ def main():
     ap.add_argument("--tier3", type=int, default=0, help="number of random formats")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--all", action="store_true")
+    ap.add_argument("--lua54", action="store_true",
+                    help="diff the lua_5_4_8 branch against lua5.4.8 (5.4.8 oracle)")
     args = ap.parse_args()
 
-    ensure_golua()
+    if args.lua54:
+        sys.path.insert(0, os.path.dirname(HERE))
+        import lua54
+        global GOLUA, REFLUA
+        GOLUA = lua54.ensure_golua54(GOLUA_REPO)
+        REFLUA = os.environ.get("REFLUA", "lua5.4.8")
+    else:
+        ensure_golua()
     os.makedirs(CORPUS, exist_ok=True)
 
     tiers = set(args.tier)

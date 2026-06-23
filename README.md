@@ -27,17 +27,32 @@ divergence these tools find; this repo keeps the *finders*.
   harness builds `cmd/lua` from it on first run.
 - **Go** (to build golua).
 - **Python 3** (the generators; no third-party packages).
-- Official reference interpreters on `PATH`: **`lua5.5.0`** (the 5.5 oracle) and
-  optionally **`lua`** (5.4.x). Override with `REFLUA=/path/to/interp`.
+- Official reference interpreters on `PATH`: **`lua5.5.0`** (the 5.5 oracle, the
+  default) and **`lua5.4.8`** (the exact 5.4.8 oracle, used by `--lua54`).
+  `lua` is typically 5.4.6 — only a proxy; prefer `lua5.4.8`. Override the
+  reference with `REFLUA=/path/to/interp`.
 
 ## Quick start
 
 ```sh
 cd packfuzz
-python3 run.py --all          # deterministic tiers 0–2 (~2s) — empty corpus = clean
-python3 run.py --tier3 50000  # randomized grind
+python3 run.py --all          # deterministic tiers (~2s) — empty corpus = clean
+python3 run.py --tier3 50000  # randomized grind vs lua5.5.0 (golua master)
 ./a.sh                        # multi-seed grind (seeds 1..8), durable corpus/report.txt
 ```
+
+### Testing the v1 / Lua 5.4.8 branch — `--lua54`
+
+`--lua54` builds golua from golua's `lua_5_4_8` branch (into a dedicated
+*detached* git worktree under `.worktrees/`, so it never disturbs your main
+checkout) and defaults the reference to `lua5.4.8` instead of `lua5.5.0`:
+
+```sh
+python3 run.py --all --lua54        # golua lua_5_4_8 branch  vs  lua5.4.8
+```
+
+`REFLUA=...` still overrides the reference; the worktree is rebuilt each run so
+local `lua_5_4_8` commits are always reflected.
 
 ```sh
 cd luadiff

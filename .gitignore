@@ -10,3 +10,6 @@
 
 __pycache__/
 *.pyc
+
+# --lua54 detached worktree + 5.4.8 golua build
+.worktrees/

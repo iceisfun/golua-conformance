@@ -196,6 +196,74 @@ def illegal():
     return dedup(out)
 
 
+# --- Depth tier: length / recursion-limit stress ------------------------------
+#
+# Every other tier emits SHORT patterns (tier3 maxatoms<=8), so golua's matcher
+# recursion guard (maxMatchCalls, ~200 frames) is never approached and the whole
+# class of "pattern too complex" / deep-recursion bugs is unreachable. This tier
+# walks pattern LENGTH and nesting DEPTH across that boundary so a pattern the
+# reference folds in one frame but golua recurses on (or vice-versa) surfaces as
+# a differential. Run against short subjects (incl. "") — the point is pattern
+# structure, not subject backtracking.
+#
+# k values bracket the historical limit (200) on both sides with margin.
+DEPTH_K = [1, 8, 31, 32, 33, 50, 100, 150, 198, 199, 200, 201, 250, 400, 600]
+
+
+def tier_depth():
+    out = []
+
+    # Chained zero/low-match quantifiers — the shape the reference folds via
+    # `p = ep + 1; goto init` without consuming match depth.
+    for unit in ["a*", "a-", "a?", ".-", ".*", "[%a]*", "%a*", "a*b*"]:
+        for k in DEPTH_K:
+            out.append(unit * k)
+
+    # Quantified runs preceded by a consume, so the tail folds against "".
+    for k in DEPTH_K:
+        out.append("a+" + "b*" * k)
+        out.append("%a+" + ".-" * k)
+
+    # Nested capture/group depth (open n, body, close n) and sibling-capture
+    # count — both bracket the luaMaxCaptures=32 boundary and deep recursion.
+    for k in DEPTH_K:
+        if k <= 64:                       # keep paren depth sane
+            out.append("(" * k + "a?" + ")" * k)
+            out.append("(a?)" * k)
+
+    # Position-capture runs (no char consumed; pure structural depth).
+    for k in DEPTH_K:
+        out.append("()" * k)
+
+    # Deeply chained balanced / frontier constructs.
+    for k in DEPTH_K:
+        if k <= 200:
+            out.append("%f[%a]" * k)
+            out.append("%b()" * k)
+
+    # Long alternating literal/class sequences (no quantifier; deep tail-call
+    # via the main loop's `continue`).
+    for k in DEPTH_K:
+        out.append("%a" * k)
+        out.append("ab" * k)
+
+    return dedup(out)
+
+
+# Subjects for the depth tier: short, but include strings that make the chains
+# actually consume (so both the zero-match fold AND the match path are walked).
+DEPTH_SUBJECTS = [
+    b"",
+    b"a",
+    b"aaaa",
+    b"a" * 64,
+    b"ab" * 64,
+    b"abc def ghi",
+    b"(((nested)))",
+    b"\x00",
+]
+
+
 # --- Tier 3: randomized pattern strings ---------------------------------------
 
 # Atoms the random generator draws from. Skewed toward magic/structure so random

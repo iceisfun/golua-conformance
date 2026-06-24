@@ -64,6 +64,15 @@ _PLAIN_SPECS = [
     ("s_1",      '"1"'),
     ("s_m1",     '"-1"'),
     ("s_p1",     '"+1"'),
+    # Signed-zero strings. The integer-first coercion rule (luaO_str2num) makes
+    # an integer-parseable "-0" the integer 0 -> +0.0, NOT the float -0.0 a bare
+    # ParseFloat yields. "-0.0"/"-0e0" are genuine floats and keep their sign.
+    # This axis caught the math.* getNumber coercion bug (golua sqrt("-0")=-0).
+    ("s_neg0",   '"-0"'),
+    ("s_neg0ws", '"  -0  "'),
+    ("s_neg0f",  '"-0.0"'),
+    ("s_neg0e",  '"-0e0"'),
+    ("s_pos0",   '"+0"'),
     ("s_1e3",    '"1e3"'),
     ("s_1e309",  '"1e309"'),
     ("s_0x10",   '"0x10"'),

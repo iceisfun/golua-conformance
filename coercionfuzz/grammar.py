@@ -187,10 +187,14 @@ def tier2():
         cases.append({"id": "t2_%d" % cid, "kind": "fornum",
                       "a": a, "b": _lit("3"), "c": three}); cid += 1
 
-    # Library coercion contexts across a representative operand slice.
-    libset = [op for op in plains if op.name in {
-        "i1", "im1", "f0", "nan", "inf", "s_1", "s_1e3", "s_0x10",
-        "s_ws5", "s_p1", "s_abc", "s_empty", "nil", "true", "table"}]
+    # Library coercion contexts. The string->number coercion done by library
+    # arguments (getNumber/getInt) is a distinct path from operator coercion and
+    # has its own bugs (e.g. math.* not coercing integer-first), so feed EVERY
+    # string operand plus a number/ref slice — not just a token sample.
+    numeric_ref_slice = {"i0", "i1", "im1", "f0", "fm0", "nan", "inf", "ninf",
+                         "nil", "true", "table"}
+    libset = [op for op in plains
+              if op.name.startswith("s_") or op.name in numeric_ref_slice]
     for name, form in LIB_CALLS:
         for a in libset:
             cases.append({"id": "t2_%d" % cid, "kind": "lib",

@@ -195,6 +195,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", action="append", type=int, default=[])
     ap.add_argument("--illegal", action="store_true", help="run the malformed-pattern tier")
+    ap.add_argument("--depth", action="store_true",
+                    help="run the length/recursion-limit stress tier")
     ap.add_argument("--tier3", type=int, default=0, help="number of random patterns")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--all", action="store_true")
@@ -233,6 +235,8 @@ def main():
         all_leads += run(grammar.tier2(), valmod.FIXED_SUBJECTS, "tier2")
     if args.illegal or args.all:
         all_leads += run(grammar.illegal(), valmod.CORE_SUBJECTS, "illegal")
+    if args.depth or args.all:
+        all_leads += run(grammar.tier_depth(), grammar.DEPTH_SUBJECTS, "depth")
     if args.tier3:
         import random
         rng = random.Random(args.seed)

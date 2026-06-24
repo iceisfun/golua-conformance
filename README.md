@@ -17,6 +17,12 @@ divergence these tools find; this repo keeps the *finders*.
 | Dir         | Tool                                                                    |
 |-------------|-------------------------------------------------------------------------|
 | `packfuzz/` | State-machine grinder for `string.pack` / `unpack` / `packsize`. Treats the pack format as a finite grammar, enumerates it exhaustively (tiers 0–2) + randomized (tier 3), and checks differential parity vs `lua5.5.0` plus four oracle-free invariants. |
+| `patternfuzz/` | Lua pattern-matching grammar grinder (`find`/`match`/`gmatch`/`gsub`): classes, sets, quantifiers, captures, `%b`/`%f`/back-refs, malformed-pattern error wording, randomized tier3, and a `--depth` tier that stresses pattern length / recursion-limit boundaries. |
+| `formatfuzz/` | `string.format` conversion/flag/width/precision matrix vs the reference. |
+| `coercionfuzz/` | Type-coercion & operator-semantics grinder: string→number coercion, metamethod dispatch ordering, numeric-for bounds, key normalization, and library-argument coercion (incl. signed-zero strings). |
+| `mathfuzz/` | Every `math.*` function over an edge-magnitude battery (±0, subnormals, extremes, NaN/Inf, domain edges). ULP-aware: exact functions must be bit-identical; transcendental ones tolerate Go-vs-libm last-ULP drift. |
+| `datefuzz/` | `os.date` / `os.time` strftime + field-normalization differential. |
+| `utf8fuzz/` | `utf8.*` (char/codepoint/len/offset/codes) over valid + malformed byte sequences. |
 | `luadiff/`  | Generic single-file differential harness: run one `.lua` under golua and the reference, normalize prog-name/paths/pointers, diff stdout+stderr+exit. Resource-limited, concurrency-safe. |
 | `docs/`     | Design notes (e.g. the packfuzz state-machine plan).                     |
 

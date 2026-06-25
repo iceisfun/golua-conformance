@@ -21,6 +21,7 @@ divergence these tools find; this repo keeps the *finders*.
 | `formatfuzz/` | `string.format` conversion/flag/width/precision matrix vs the reference. |
 | `coercionfuzz/` | Type-coercion & operator-semantics grinder: string→number coercion, metamethod dispatch ordering, numeric-for bounds, key normalization, and library-argument coercion (incl. signed-zero strings). |
 | `mathfuzz/` | Every `math.*` function over an edge-magnitude battery (±0, subnormals, extremes, NaN/Inf, domain edges). ULP-aware: exact functions must be bit-identical; transcendental ones tolerate Go-vs-libm last-ULP drift. |
+| `coroutinefuzz/` | Coroutine state-machine grinder: drivers (resume/wrap/pcall/xpcall) × yield-sites (every metamethod, iterators, C-call-boundary callbacks) × error payloads, plus close/nesting/identity specials. Diffs the full resume/yield/error/status trace. Targets golua's biggest mechanism divergence (goroutines vs C-stack). |
 | `datefuzz/` | `os.date` / `os.time` strftime + field-normalization differential. |
 | `utf8fuzz/` | `utf8.*` (char/codepoint/len/offset/codes) over valid + malformed byte sequences. |
 | `luadiff/`  | Generic single-file differential harness: run one `.lua` under golua and the reference, normalize prog-name/paths/pointers, diff stdout+stderr+exit. Resource-limited, concurrency-safe. |

@@ -105,15 +105,14 @@ for _, c in ipairs(CASES) do
   local ok, r = pcall(format, c.fmt, table.unpack(c.args, 1, c.args.n or #c.args))
   if ok then
     if c.ptr == 1 then
-      -- A %p pointer's textual form (length AND digits) is implementation-
-      -- defined, and %Np width-pads it differently per interpreter. We cannot
-      -- compare the bytes, so we record only that formatting SUCCEEDED plus the
-      -- output length-class with pointer runs masked out. canon_ptr collapses
-      -- 0x<hex>/(null) and adjacent spaces; any residual length-dependence on
-      -- the pointer digit count is intentionally dropped by masking all hex
-      -- runs of length >= 8 to a single token before hashing.
-      local masked = gsub(canon_ptr(r), "%x%x%x%x%x%x%x%x+", "<ptr>")
-      emit("F", id, "ok", "PTR:" .. hex(masked))
+      -- A %p pointer's textual form is implementation-defined in BOTH its digit
+      -- count (golua's Go-heap pointers are 12 hex, PUC's are 14) AND, under a
+      -- %Np width, the resulting padded LENGTH — so neither the bytes nor the
+      -- length-class are comparable across interpreters (this was the source of
+      -- the residual %p corpus leads). The only portable thing to check for a
+      -- %p directive is that formatting SUCCEEDED, so record a constant token;
+      -- the ok-vs-err parity above still catches a real %p formatting bug.
+      emit("F", id, "ok", "PTR")
     else
       emit("F", id, "ok", hex(r))
     end

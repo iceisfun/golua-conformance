@@ -83,9 +83,25 @@ def diff_outputs(golua_out, ref_out):
     for key in sorted(set(gi) | set(ri)):
         g = gi.get(key, "<missing>")
         r = ri.get(key, "<missing>")
-        if g != r:
+        if g != r and not _platform_wontfix(key, g, r):
             diffs.append((key, g, r))
     return diffs
+
+
+def _platform_wontfix(key, g, r):
+    """True for documented platform/version won't-fixes, so the corpus reaches
+    empty and any new lead is real signal. See golua wontfix/."""
+    kind = key[0]
+    # Signed-zero constant folding (wontfix/signed-zero-const-fold): for an
+    # all-constant arithmetic expression golua keeps the IEEE sign (-0.0) while
+    # reference's compile-time folder normalizes to +0.0. golua is the
+    # more-correct side. Scoped to 'binop' (folded arithmetic) and to diffs whose
+    # ONLY difference is golua "F-0" where reference has "F+0", so it cannot mask
+    # a real runtime signed-zero bug (those surface on non-binop kinds, e.g. the
+    # math.sqrt("-0") lib-coercion bug, and as other-token differences).
+    if kind == "binop" and g.replace("F-0", "F+0") == r:
+        return True
+    return False
 
 
 def panic_in(stderr):

@@ -97,9 +97,36 @@ def diff_outputs(golua_out, ref_out):
     for key in sorted(set(gi) | set(ri)):
         g = gi.get(key, "<missing>")
         r = ri.get(key, "<missing>")
-        if g != r:
+        if g != r and not _platform_wontfix(g, r):
             diffs.append((key, g, r))
     return diffs
+
+
+def _platform_wontfix(g, r):
+    """True for documented Go-time-vs-glibc platform won't-fixes (see golua
+    wontfix/). Only the REPRESENTATION-PARITY class is auto-allowlisted here: it
+    is unambiguous (one side errors "cannot be represented", the other does not).
+
+    The other two datefuzz platform classes are deliberately NOT auto-allowlisted
+    because they manifest as ordinary VALUE differences and a blanket value
+    pattern would risk masking a real date bug during a sweep:
+      - DST-boundary resolution: under a DST zone os.time of an ambiguous/
+        nonexistent wall-clock differs by the DST offset (3600s) between Go's
+        time and glibc's mktime.
+      - INT32 tm_year overflow: at extreme years C's int32 tm_year wraps
+        (negative) while golua's 64-bit Go time stays correct — golua is the
+        more-correct side.
+    Those remain visible as a small, KNOWN residue; recognize them by the 3600s
+    delta / wrapped-year sign rather than auto-dropping them. The cleanest empty
+    baseline is a UTC-only run (no DST class)."""
+    # Representation parity, either direction (os.time{isdst} under a no-DST zone
+    # where glibc's mktime applies a -3600 hack and returns a value; and the
+    # converse where Go computes a valid time glibc's mktime rejects).
+    g_rep = "cannot be represented" in g
+    r_rep = "cannot be represented" in r
+    if g_rep != r_rep:
+        return True
+    return False
 
 
 def invariant_failures(golua_out):

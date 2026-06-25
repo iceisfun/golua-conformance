@@ -56,6 +56,8 @@ CURATED = {
     "format_width_huge":  'return ("%2000000000d"):format(1)',
     "format_prec_huge":   'return ("%.2000000000f"):format(1.5)',
     "pack_huge_count":    'return string.pack(("i8"):rep(100000000))',
+    "pack_fixed_huge":    'return string.pack("c" .. (1<<40), "x")',  # >1<<30 fixed size: catchable, not host OOM
+    "concat_over_cap":    'local a=("x"):rep(600000000) return #table.concat({a,a})',  # >1<<30 join: catchable
     "packsize_huge":      'return string.packsize(("i8"):rep(100000000))',
     "table_grow_cap":     'local t={} for i=1,2e7 do t[i]=i end return #t',
     "table_create_huge":  'return table.create and table.create(math.maxinteger) or "n/a"',

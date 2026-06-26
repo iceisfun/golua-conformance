@@ -332,9 +332,12 @@ local function install_base(I)
     return I:call(fn, { n = 0 })
   end)
 
+  local dump = require("dump")
+
   def("load", function(I, args)
     local chunk = args[1]
     local chunkname = args[2]
+    local mode = args[3]
     local env = args[4]
     local has_env = args.n >= 4
     local src
@@ -355,8 +358,24 @@ local function install_base(I)
     else
       argerror(I, 1, "load", "string or function expected")
     end
+
+    local binary = dump.is_binary(src)
+    local allow_t = (mode == nil) or mode:find("t", 1, true)
+    local allow_b = (mode == nil) or mode:find("b", 1, true)
+    if binary and not allow_b then
+      return R(nil, "attempt to load a binary chunk (mode is '" .. mode .. "')")
+    end
+    if (not binary) and not allow_t then
+      return R(nil, "attempt to load a text chunk (mode is '" .. mode .. "')")
+    end
+
     local ok, fn = pcall(function()
-      return I:load(src, chunkname, env, has_env)
+      if binary then
+        local proto = dump.undump(src)
+        return I:closure_from_proto(proto, env, has_env)
+      else
+        return I:load(src, chunkname, env, has_env)
+      end
     end)
     if ok then
       return R(fn)
@@ -365,7 +384,7 @@ local function install_base(I)
       if type(msg) == "table" and getmetatable(msg) == I.GUEST_ERR_MT then
         msg = msg.value
       end
-      return R(nil, tostring(msg))
+      return R(nil, tostring((msg):gsub("^.-:%d+: ", "")))
     end
   end)
 end
@@ -631,8 +650,13 @@ local function install_string(I)
   end
 
   def("dump", function(I, args)
-    check_func(I, args, 1, "dump")
-    I:rt_error("unable to dump given function")
+    local fn = args[1]
+    if type(fn) == "function" then
+      I:rt_error("unable to dump given function")   -- native (C) function
+    end
+    if not rt.is_closure(fn) then typeerror(I, 1, "dump", "function", args) end
+    local strip = rt.truthy(args[2])
+    return R(require("dump").dump(fn.proto, strip))
   end)
 end
 

@@ -614,6 +614,18 @@ function Interp:load(source, chunkname, env, has_env)
   return rt.new_closure(proto, { env_uv })
 end
 
+-- wrap a (deserialized) proto as a closure: first upvalue = env, the rest nil
+-- (matching how Lua loads a dumped function — upvalue values are not preserved)
+function Interp:closure_from_proto(proto, env, has_env)
+  local envval
+  if has_env then envval = env else envval = self.globals end
+  local n = #proto.upvals
+  local upvals = {}
+  for i = 1, n do upvals[i] = { closed = true, val = (i == 1) and envval or nil } end
+  if n == 0 then upvals[1] = { closed = true, val = envval } end
+  return rt.new_closure(proto, upvals)
+end
+
 -- protected call: restores frame stack/depth on error so the VM stays
 -- consistent after a caught guest error.  Returns ok, results|errvalue.
 function Interp:protected(fn, args)

@@ -523,6 +523,19 @@ function Interp:exec_loop(frame)
         local want = b - 1
         for i = 1, want do R[a + i - 1] = va[i] end
       end
+    elseif op == "UNPACKVARARG" then
+      -- `...` for a named vararg: table.unpack(t, 1, t.n), read dynamically
+      local t = R[ins.b]
+      local n = rt.toint(rt.rawget(t, "n")) or 0
+      if n < 0 then n = 0 end
+      local b = ins.c
+      if b == 0 then
+        for i = 1, n do R[a + i - 1] = rt.rawget(t, i) end
+        frame.top = a + n
+      else
+        local want = b - 1
+        for i = 1, want do R[a + i - 1] = (i <= n) and rt.rawget(t, i) or nil end
+      end
     elseif op == "VARARGPACK" then
       -- materialize varargs as a table {n = count, [1..] = ...}
       local va = frame.varargs

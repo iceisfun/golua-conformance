@@ -59,6 +59,16 @@ function FS:pc() return #self.proto.code end
 -- index of the *next* instruction to be emitted (i.e. a forward jump target)
 function FS:here() return #self.proto.code + 1 end
 
+-- emit a vararg expansion: for a named vararg (...t) `...` aliases the table
+-- (table.unpack(t, 1, t.n)); otherwise it reads the raw vararg area.
+function FS:emit_vararg(reg, b, line)
+  if self.vararg_reg then
+    self:emit("UNPACKVARARG", reg, self.vararg_reg, b, line)
+  else
+    self:emit("VARARG", reg, b, line)
+  end
+end
+
 function FS:setarg(pc, field, val) self.proto.code[pc][field] = val end
 
 function FS:K(value)
@@ -275,7 +285,7 @@ function exp2reg(fs, node, reg)
   elseif tag == "Number" or tag == "String" then
     fs:emit("LOADK", reg, fs:K(node.value), nil, node.line)
   elseif tag == "Vararg" then
-    fs:emit("VARARG", reg, 2, nil, node.line)   -- want 1 value
+    fs:emit_vararg(reg, 2, node.line)   -- want 1 value
   elseif tag == "Name" then
     local kind, where = fs:resolve(node.name)
     if kind == "local" then
@@ -447,7 +457,7 @@ local function explist_open(fs, exprs, base)
   if is_multi(last) then
     fs:checkstack(lastreg)
     if last.tag == "Vararg" then
-      fs:emit("VARARG", lastreg, 0, nil, last.line)   -- all
+      fs:emit_vararg(lastreg, 0, last.line)   -- all
     else
       compile_call(fs, last, lastreg, -1)             -- all results
     end
@@ -556,7 +566,7 @@ function compile_table(fs, node, reg)
         fs:checkstack(valreg)
         fs.freereg = valreg
         if f.value.tag == "Vararg" then
-          fs:emit("VARARG", valreg, 0, nil, f.value.line)
+          fs:emit_vararg(valreg, 0, f.value.line)
         else
           compile_call(fs, f.value, valreg, -1)
         end
@@ -684,7 +694,7 @@ function adjust_explist(fs, exprs, base, nvars)
     if want < 0 then want = 0 end
     fs:checkstack(lastreg + math.max(want, 1) - 1)
     if last.tag == "Vararg" then
-      fs:emit("VARARG", lastreg, want + 1, nil, last.line)
+      fs:emit_vararg(lastreg, want + 1, last.line)
     else
       compile_call(fs, last, lastreg, want)
     end
@@ -925,7 +935,10 @@ function compile_stmt(fs, node)
       -- track declared globals (permissive on undeclared use — enforcing
       -- "variable not declared" requires block-scoped decls; we only enforce
       -- <const> on explicitly named globals, which is unambiguous).
-      for _, nm in ipairs(node.names) do g.declared[nm] = true end
+      for _, nm in ipairs(node.names) do
+        g.declared[nm] = true
+        g.const[nm] = nil   -- a (re)declaration's own init may assign
+      end
       -- `global names = exprs` (or `global function f ...`) initializes; this
       -- assignment must run BEFORE marking const (init of a const is allowed).
       if node.exprs then
@@ -981,6 +994,7 @@ function Compiler.compile_function(parent_fs, node)
     fs:reserve(1)
     fs:emit("VARARGPACK", reg, nil, nil, node.line)
     fs:new_local(node.vararg_name, reg, nil)
+    fs.vararg_reg = reg     -- `...` now aliases this table
   end
   for _, s in ipairs(node.body.stmts) do compile_stmt(fs, s) end
   -- implicit return

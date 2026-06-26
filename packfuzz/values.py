@@ -10,7 +10,9 @@ Values are emitted as tagged tuples consumed by emit.py:
   ('str',   bytes)
 """
 
+import math
 import random
+import struct
 
 INT64_MAX = (1 << 63) - 1
 INT64_MIN = -(1 << 63)
@@ -139,6 +141,24 @@ def _float_boundaries(is32):
     return base
 
 
+def _rand_double(is32, rng):
+    """A random double. For float32 slots, drawn within the float32 dynamic
+    range and usually NOT exactly float32-representable, so pack('f') exercises
+    double->float32 narrowing rounding (Go float32() vs C (float)cast). For
+    float64 slots, a uniform random bit pattern (pack('d')/unpack round-trip of
+    any representable value)."""
+    if is32:
+        d = math.ldexp(rng.getrandbits(40), rng.randint(-149, 100))
+        if not math.isfinite(d) or abs(d) > 3.0e38:
+            return 1.5
+        return -d if rng.random() < 0.5 else d
+    for _ in range(8):
+        d = struct.unpack("<d", struct.pack("<Q", rng.getrandbits(64)))[0]
+        if math.isfinite(d):
+            return d
+    return 1.0
+
+
 def _str_value(length, embed_nul, rng):
     if length <= 0:
         return b""
@@ -191,9 +211,11 @@ def _slot_value(slot, prof, rng):
                "special": 1, "rand": -1}.get(prof, 0)
         return ("int", b[idx % len(b)])
     if k in ("float32", "float64"):
+        if prof == "rand":
+            return ("float", _rand_double(k == "float32", rng))
         b = _float_boundaries(k == "float32")
         idx = {"min": 1, "max": 8 if len(b) > 8 else 0, "neg": 3,
-               "special": 6, "rand": 7}.get(prof, 0)
+               "special": 6}.get(prof, 0)
         return ("float", b[idx % len(b)])
     if k == "cstr":
         if slot.width < 0:

@@ -925,11 +925,9 @@ function compile_stmt(fs, node)
       -- track declared globals (permissive on undeclared use — enforcing
       -- "variable not declared" requires block-scoped decls; we only enforce
       -- <const> on explicitly named globals, which is unambiguous).
-      for i, nm in ipairs(node.names) do
-        g.declared[nm] = true
-        if node.attribs[i] == "const" then g.const[nm] = true end
-      end
-      -- `global names = exprs` (or `global function f ...`) also assigns
+      for _, nm in ipairs(node.names) do g.declared[nm] = true end
+      -- `global names = exprs` (or `global function f ...`) initializes; this
+      -- assignment must run BEFORE marking const (init of a const is allowed).
       if node.exprs then
         local targets = {}
         for _, nm in ipairs(node.names) do
@@ -937,6 +935,9 @@ function compile_stmt(fs, node)
         end
         compile_assign(fs, { tag = "Assign", targets = targets,
           exprs = node.exprs, line = node.line })
+      end
+      for i, nm in ipairs(node.names) do
+        if node.attribs[i] == "const" then g.const[nm] = true end
       end
     end
   else error("compiler: unknown statement " .. tostring(tag)) end

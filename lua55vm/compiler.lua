@@ -1016,7 +1016,7 @@ function Compiler.compile_function(parent_fs, node)
     local reg = fs.freereg
     fs:reserve(1)
     fs:emit("VARARGPACK", reg, nil, nil, node.line)
-    fs:new_local(node.vararg_name, reg, nil)
+    fs:new_local(node.vararg_name, reg, "const")   -- the ...t parameter is read-only
     fs.vararg_reg = reg     -- `...` now aliases this table
   end
   for _, s in ipairs(node.body.stmts) do compile_stmt(fs, s) end

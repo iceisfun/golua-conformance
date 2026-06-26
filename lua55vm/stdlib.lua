@@ -1545,12 +1545,13 @@ local function install_debug(I)
     end
     local info = rt.new_table()
     local h = info.hash
-    local theproto, thefunc
+    local theproto, thefunc, theframe
     if type(f) == "number" then
       -- level: 1 = caller of getinfo
       local level = rt.toint(f)
       local frame = I.frames[#I.frames - level]
       if frame == nil then return R(nil) end
+      theframe = frame
       thefunc = frame.cl or frame.fn
       if frame.native then
         h["source"] = "=[C]"; h["short_src"] = "[C]"
@@ -1614,6 +1615,15 @@ local function install_debug(I)
         h["activelines"] = nil   -- C functions have no active lines
       end
     end
+    -- "t": tail-call info and (5.5) the number of extra (vararg) arguments
+    if what:find("t", 1, true) then
+      h["istailcall"] = (theframe and theframe.istail) or false
+      if theframe and theframe.varargs then
+        h["extraargs"] = theframe.varargs.n
+      else
+        h["extraargs"] = 0
+      end
+    end
     return R(info)
   end)
 
@@ -1665,7 +1675,8 @@ local function install_debug(I)
     local ud = f.proto.upvals[n]
     if ud == nil then return R(nil) end
     local uv = f.upvals[n]
-    local val = uv.closed and uv.val or uv.frame_R[uv.idx]
+    local val                       -- explicit: a closed upvalue may hold nil
+    if uv.closed then val = uv.val else val = uv.frame_R[uv.idx] end
     return R(ud.name, val)
   end)
 

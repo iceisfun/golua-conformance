@@ -309,29 +309,34 @@ end
 -- call any callable; args = {n=, [1..]}; returns results = {n=, [1..]}
 function Interp:call(fn, args)
   self.errhint = nil    -- invalidate any pending operand hint
-  if type(fn) == "function" then
-    -- native: push a marker frame so error levels / tracebacks count it
-    local frames = self.frames
-    local nf = { native = true, fn = fn }
-    frames[#frames + 1] = nf
-    if self.hook and self.hook.call then self:fire_hook("call") end
-    local res = fn(self, args)
-    -- return hooks fire for C functions too (e.g. the 'return sethook' event
-    -- right after a return hook is installed inside a C call)
-    if self.hook and self.hook.ret then self:fire_hook("return") end
-    frames[#frames] = nil
-    if res == nil then return { n = 0 } end
-    return res
-  elseif rt.is_closure(fn) then
-    return self:run_closure(fn, args)
-  else
-    local h = self:metamethod(fn, "__call")
-    if h ~= nil then
+  local ccmt = 0        -- __call chain length (Lua bounds it at 15)
+  while true do
+    if type(fn) == "function" then
+      -- native: push a marker frame so error levels / tracebacks count it
+      local frames = self.frames
+      local nf = { native = true, fn = fn }
+      frames[#frames + 1] = nf
+      if self.hook and self.hook.call then self:fire_hook("call") end
+      local res = fn(self, args)
+      -- return hooks fire for C functions too (e.g. the 'return sethook' event
+      -- right after a return hook is installed inside a C call)
+      if self.hook and self.hook.ret then self:fire_hook("return") end
+      frames[#frames] = nil
+      if res == nil then return { n = 0 } end
+      return res
+    elseif rt.is_closure(fn) then
+      return self:run_closure(fn, args)
+    else
+      local h = self:metamethod(fn, "__call")
+      if h == nil then
+        self:rt_error("attempt to call a " .. rt.typename(fn) .. " value")
+      end
+      ccmt = ccmt + 1
+      if ccmt > 15 then self:rt_error("'__call' chain too long") end
       local nargs = { n = args.n + 1, fn }
       for i = 1, args.n do nargs[i + 1] = args[i] end
-      return self:call(h, nargs)
+      args = nargs; fn = h   -- loop instead of recursing
     end
-    self:rt_error("attempt to call a " .. rt.typename(fn) .. " value")
   end
 end
 
@@ -611,6 +616,21 @@ function Interp:exec_loop(frame)
       for i = 1, nargs do cargs[i] = R[a + i] end
       local _ce = self:close_upvals(frame, 0)
       if _ce ~= nil then error(_ce, 0) end
+      -- resolve a __call chain in place so 'return obj()' stays a proper tail
+      -- call (no stack growth) even when obj is a callable table
+      local ccmt = 0
+      while not rt.is_callable(fn) do
+        local h = self:metamethod(fn, "__call")
+        if h == nil then
+          self:rt_error("attempt to call a " .. rt.typename(fn) .. " value")
+        end
+        ccmt = ccmt + 1
+        if ccmt > 15 then self:rt_error("'__call' chain too long") end
+        local nc = { n = cargs.n + 1, fn }
+        for i = 1, cargs.n do nc[i + 1] = cargs[i] end
+        cargs = nc; fn = h
+      end
+      nargs = cargs.n
       if rt.is_closure(fn) then
         -- reuse this frame: true tail call (no stack growth)
         local p = fn.proto
@@ -816,6 +836,8 @@ function Interp:closure_from_proto(proto, env, has_env)
   if has_env then envval = env else envval = self.globals end
   local n = #proto.upvals
   local upvals = {}
+  -- Lua binds the FIRST upvalue (by index) to the env; the rest are nil. (For a
+  -- dumped function whose _ENV isn't first, the caller sets it via setupvalue.)
   for i = 1, n do upvals[i] = { closed = true, val = (i == 1) and envval or nil } end
   if n == 0 then upvals[1] = { closed = true, val = envval } end
   return rt.new_closure(proto, upvals)
@@ -846,7 +868,8 @@ function Interp:protected(fn, args, handler)
   local hresult
   if handler then
     local hok, hr = pcall(self.call, self, handler, { errval(res), n = 1 })
-    if hok then hresult = hr[1] else hresult = errval(hr) end
+    -- if the message handler itself errors, Lua reports LUA_ERRERR
+    if hok then hresult = hr[1] else hresult = "error in error handling" end
   end
   -- now unwind, running pending to-be-closed handlers (inner frames first); pop
   -- each frame BEFORE running its handler so nested calls stay contiguous.

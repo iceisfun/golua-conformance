@@ -8,17 +8,40 @@ local sunpack = string.unpack
 
 local M = {}
 
-M.SIGNATURE = "\27LuaVM\1"   -- leading \27 marks a binary chunk (like Lua's)
+-- A Lua 5.5-compatible binary header precedes our own bytecode body, so that
+-- tools/tests inspecting the header (signature, version, sizes, sentinel
+-- numbers) see exactly what PUC produces, and a single corrupted header byte
+-- invalidates the chunk. The body after the header is our VM's own format.
+local HEADER_FMT = "c4BBc6BiBI4BjBn"
+M.SIGNATURE = spack(HEADER_FMT,
+  "\27Lua",                 -- signature
+  0x55,                     -- version 5.5
+  0,                        -- format 0
+  "\25\147\r\n\26\n",       -- LUAC_DATA  ("\x19\x93\r\n\x1a\n")
+  string.packsize("i"),     -- sizeof(int)
+  -0x5678,                  -- LUAC_INT sentinel (test int)
+  4,                        -- sizeof(instruction)
+  0x12345678,               -- test instruction
+  string.packsize("j"),     -- sizeof(lua_Integer)
+  -0x5678,                  -- test integer
+  string.packsize("n"),     -- sizeof(lua_Number)
+  -370.5)                   -- LUAC_NUM sentinel (test float)
 
 -- ---------------------------------------------------------------------------
 -- encoder
 -- ---------------------------------------------------------------------------
 
-local function enc_proto(out, p, strip)
+local function enc_proto(out, p, strip, psource)
   out[#out + 1] = spack("<i4i4B", p.numparams or 0, p.maxstack or 2,
     p.is_vararg and 1 or 0)
   out[#out + 1] = spack("<i4", p.line or 0)
-  out[#out + 1] = spack("<s4", strip and "" or (p.source or "?"))
+  -- store the source only when it differs from the parent's (Lua dumps "" for a
+  -- nested function sharing its parent's source) so it isn't repeated per proto
+  if strip or p.source == psource then
+    out[#out + 1] = spack("<s4", "")
+  else
+    out[#out + 1] = spack("<s4", p.source or "?")
+  end
   out[#out + 1] = spack("<s4", strip and "" or (p.chunkname or ""))
 
   -- constants
@@ -76,7 +99,7 @@ local function enc_proto(out, p, strip)
   -- nested protos
   local protos = p.protos
   out[#out + 1] = spack("<i4", #protos)
-  for i = 1, #protos do enc_proto(out, protos[i], strip) end
+  for i = 1, #protos do enc_proto(out, protos[i], strip, p.source) end
 end
 
 function M.dump(proto, strip)
@@ -89,7 +112,7 @@ end
 -- decoder
 -- ---------------------------------------------------------------------------
 
-local function dec_proto(s, pos)
+local function dec_proto(s, pos, psource)
   local p = { code = {}, lines = {}, consts = {}, protos = {},
               upvals = {}, locvars = {} }
   local np, maxstack, va
@@ -97,6 +120,7 @@ local function dec_proto(s, pos)
   p.numparams = np; p.maxstack = maxstack; p.is_vararg = (va == 1)
   p.line, pos = sunpack("<i4", s, pos)
   p.source, pos = sunpack("<s4", s, pos)
+  if p.source == "" then p.source = psource end   -- inherit parent's source
   p.chunkname, pos = sunpack("<s4", s, pos)
   if p.chunkname == "" then p.chunkname = nil end
 
@@ -136,17 +160,22 @@ local function dec_proto(s, pos)
   end
 
   local nprotos; nprotos, pos = sunpack("<i4", s, pos)
-  for i = 1, nprotos do p.protos[i], pos = dec_proto(s, pos) end
+  for i = 1, nprotos do p.protos[i], pos = dec_proto(s, pos, p.source) end
 
   return p, pos
 end
 
--- returns proto or raises an error ("bad binary format")
+-- returns proto or raises an error. A too-short chunk is "truncated"; a header
+-- that doesn't match exactly is a "bad binary format".
 function M.undump(s)
-  if s:sub(1, #M.SIGNATURE) ~= M.SIGNATURE then
-    error("bad binary format (signature mismatch)")
+  local hlen = #M.SIGNATURE
+  if #s < hlen then error("truncated precompiled chunk") end
+  if s:sub(1, hlen) ~= M.SIGNATURE then
+    error("bad binary format (header mismatch)")
   end
-  local proto = dec_proto(s, #M.SIGNATURE + 1)
+  -- body parse: running out of data mid-decode means a truncated chunk
+  local ok, proto = pcall(dec_proto, s, hlen + 1)
+  if not ok then error("truncated precompiled chunk") end
   return proto
 end
 

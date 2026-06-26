@@ -658,6 +658,12 @@ local function compile_assign(fs, node)
       if t.key.tag ~= "String" then
         t._keyreg = exp2anyreg(fs, t.key)
       end
+    elseif t.tag == "Name" then
+      -- resolve the target variable now (the LHS is parsed before the RHS in
+      -- Lua), so its upvalue / _ENV index is assigned before the RHS's --
+      -- making debug.getupvalue/setupvalue and dump order match PUC
+      local kind = fs:resolve(t.name)
+      if kind ~= "local" and kind ~= "upval" then fs:resolve("_ENV") end
     end
   end
 

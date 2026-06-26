@@ -1567,23 +1567,51 @@ local function install_coroutine(I)
     return R(true)
   end)
 
+  -- the resume helper used by wrap's guest closure: resume_helper(th, ...)
+  local function resume_helper(I2, args)
+    local th = args[1]
+    local a2 = { n = args.n - 1 }
+    for i = 2, args.n do a2[i - 1] = args[i] end
+    local rr = do_resume(I2, th, a2)
+    if rr[1] then
+      local out = { n = rr.n - 1 }
+      for i = 2, rr.n do out[i - 1] = rr[i] end
+      return out
+    else
+      local err = rr[2]
+      if type(err) == "table" and getmetatable(err) == I.GUEST_ERR_MT then
+        err = err.value
+      end
+      I2:throw(err)
+    end
+  end
+
+  -- A shared proto for wrap's result: `function(...) return helper(th, ...) end`
+  -- with upvalue 1 = resume_helper and upvalue 2 = the thread. Making it a real
+  -- (GC-tracked) closure -- rather than a native function -- lets the GC collect
+  -- the wrapper (and its thread) and clear weak references to it, like Lua.
+  local wrap_proto = {
+    numparams = 0, is_vararg = true, maxstack = 8,
+    source = "=[C]", chunkname = "=[C]", line = 0, lastline = 0,
+    consts = {}, protos = {}, locvars = {}, lines = { 0, 0, 0, 0 },
+    upvals = { { name = "(helper)", in_stack = false, index = 0 },
+               { name = "(thread)", in_stack = false, index = 1 } },
+    code = {
+      { op = "GETUPVAL", a = 0, b = 1 },   -- R0 = resume_helper
+      { op = "GETUPVAL", a = 1, b = 2 },   -- R1 = thread
+      { op = "VARARG",   a = 2, b = 0 },   -- R2.. = varargs
+      { op = "TAILCALL", a = 0, b = 0, c = 0 },  -- return R0(R1, ...)
+      { op = "RETURN",   a = 0, b = 1 },
+    },
+  }
+
   def("wrap", function(I, args)
     local f = check_func(I, args, 1, "wrap")
     local th = new_thread(f)
-    return R(function(I2, a2)
-      local rr = do_resume(I2, th, a2)
-      if rr[1] then
-        local out = { n = rr.n - 1 }
-        for i = 2, rr.n do out[i - 1] = rr[i] end
-        return out
-      else
-        local err = rr[2]
-        if type(err) == "table" and getmetatable(err) == I.GUEST_ERR_MT then
-          err = err.value
-        end
-        I:throw(err)
-      end
-    end)
+    return R(rt.new_closure(wrap_proto, {
+      { closed = true, val = resume_helper },
+      { closed = true, val = th },
+    }))
   end)
 end
 

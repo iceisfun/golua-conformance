@@ -1004,6 +1004,7 @@ function Compiler.compile_function(parent_fs, node)
   fs.proto.numparams = #node.params
   fs.proto.is_vararg = node.is_vararg
   fs.proto.line = node.line
+  fs.proto.lastline = node.endline or node.line
 
   fs:enter_block(false)
   for _, p in ipairs(node.params) do

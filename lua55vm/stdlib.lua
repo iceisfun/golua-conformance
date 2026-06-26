@@ -1398,22 +1398,26 @@ local function install_debug(I)
     end
     local info = rt.new_table()
     local h = info.hash
+    local theproto, thefunc
     if type(f) == "number" then
       -- level: 1 = caller of getinfo
       local level = rt.toint(f)
       local frame = I.frames[#I.frames - level]
       if frame == nil then return R(nil) end
+      thefunc = frame.cl or frame.fn
       if frame.native then
         h["source"] = "=[C]"; h["short_src"] = "[C]"
         h["currentline"] = -1; h["what"] = "C"
         h["linedefined"] = -1; h["lastlinedefined"] = -1
       else
         local p = frame.proto
+        theproto = p
         h["source"] = p.chunkname or ("@" .. p.source)
         h["short_src"] = p.source
         h["currentline"] = p.lines[frame.savedpc] or -1
         h["what"] = frame.proto.is_main and "main" or "Lua"
         h["linedefined"] = p.line or 0
+        h["lastlinedefined"] = p.lastline or p.line or 0
         h["nparams"] = p.numparams
         h["nups"] = #p.upvals
         h["isvararg"] = p.is_vararg
@@ -1432,21 +1436,38 @@ local function install_debug(I)
       end
     elseif rt.is_closure(f) then
       local p = f.proto
+      theproto = p; thefunc = f
       h["source"] = p.chunkname or ("@" .. p.source)
       h["short_src"] = p.source
       h["what"] = p.is_main and "main" or "Lua"
       h["linedefined"] = p.line or 0
+      h["lastlinedefined"] = p.lastline or p.line or 0
       h["currentline"] = -1
       h["nparams"] = p.numparams
       h["nups"] = #p.upvals
       h["isvararg"] = p.is_vararg
     elseif type(f) == "function" then
+      thefunc = f
       h["source"] = "=[C]"; h["short_src"] = "[C]"
       h["what"] = "C"; h["currentline"] = -1
       h["linedefined"] = -1; h["lastlinedefined"] = -1
-      h["nups"] = 0
+      h["nparams"] = 0; h["nups"] = 0; h["isvararg"] = true
     else
       argerror(I, idx, "getinfo", "function or level expected")
+    end
+    -- "f": the function itself
+    if what:find("f", 1, true) and thefunc ~= nil then h["func"] = thefunc end
+    -- "L": active lines (lines that have code)
+    if what:find("L", 1, true) then
+      if theproto then
+        local al = rt.new_table()
+        for _, ln in ipairs(theproto.lines) do
+          if ln and ln > 0 then rt.rawset(al, ln, true) end
+        end
+        h["activelines"] = al
+      else
+        h["activelines"] = nil   -- C functions have no active lines
+      end
     end
     return R(info)
   end)

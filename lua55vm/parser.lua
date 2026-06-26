@@ -350,9 +350,10 @@ function Parser:funcbody(line, is_method)
   end
   self:expect(")")
   local body = self:block()
+  local endline = self:cur().line
   self:expect_match("end", "function", line)
   return { tag = "Function", params = params, is_vararg = is_vararg,
-           vararg_name = vararg_name, body = body, line = line }
+           vararg_name = vararg_name, body = body, line = line, endline = endline }
 end
 
 function Parser:local_stat()

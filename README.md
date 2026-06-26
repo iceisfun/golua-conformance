@@ -32,6 +32,7 @@ divergence these tools find; this repo keeps the *finders*.
 | `utf8fuzz/` | `utf8.*` (char/codepoint/len/offset/codes) over valid + malformed byte sequences. |
 | `luadiff/`  | Generic single-file differential harness: run one `.lua` under golua and the reference, normalize prog-name/paths/pointers, diff stdout+stderr+exit. Resource-limited, concurrency-safe. |
 | `lua55vm/`  | **A self-hosted Lua 5.5 interpreter written in Lua** (lexer → parser → bytecode compiler → register VM + stdlib). Runs on a host Lua *and unchanged on golua*, so it exercises golua through a completely different execution path (`golua → lua55vm → guest program`, nestable). Differentially validated against golua via `lua55vm/scripts/difftest.sh`. See `lua55vm/README.md`. |
+| `navfuzz/`  | **A navigation pipeline written in pure Lua** (bitfield → PSLG → constrained Delaunay triangulation → navmesh + BVH + A\*/funnel/LOS). A faithful port of the `rsnav` Rust stack: divide-and-conquer Delaunay with ghost triangles, bit-packed oriented-triangle handles, and **robust adaptive `orient2d`/`incircle` predicates**. Integer grid coordinates keep the CDT exact, and Shewchuk's error-free-transform predicates use only IEEE-754 `+ - *`, so the whole pipeline is byte-deterministic — it stresses golua's 64-bit integer bit-ops, f64-equals-C float arithmetic, and deep D&C recursion, with output diffed against `lua5.5.0`. See `navfuzz/README.md`. |
 | `docs/`     | Design notes (e.g. the packfuzz state-machine plan).                     |
 
 ## Prerequisites

@@ -658,6 +658,13 @@ local function install_table(I)
     return R(t)
   end)
 
+  def("create", function(I, args)
+    -- table.create(nseq [, nrec]) -- pre-sizing is a no-op for us
+    check_int(I, args, 1, "create")
+    if args[2] ~= nil then check_int(I, args, 2, "create") end
+    return R(rt.new_table())
+  end)
+
   def("move", function(I, args)
     local a1 = check_table(I, args, 1, "move")
     local f = check_int(I, args, 2, "move")

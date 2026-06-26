@@ -74,7 +74,7 @@ local function check_int(I, args, n, fname)
   local v = args[n]
   local i = rt.toint(v)
   if i == nil then
-    if type(v) == "number" then
+    if rt.tonum(v) ~= nil then   -- a number (or numeric string) without int rep
       argerror(I, n, fname, "number has no integer representation")
     end
     typeerror(I, n, fname, "number", args)
@@ -570,9 +570,28 @@ local function install_string(I)
         elseif conv == "s" then
           argi = argi + 1
           out[#out + 1] = hostfmt(spec, I:tostring(args[argi]))
-        elseif conv == "q" then
+        elseif conv == "p" then
           argi = argi + 1
-          out[#out + 1] = string.format("%q", args[argi])
+          local v = args[argi]
+          local t = type(v)
+          if t == "string" or rt.is_table(v) or rt.is_closure(v)
+             or rt.is_thread(v) or t == "function" then
+            out[#out + 1] = hostfmt("0x%012x", I:object_id(v))
+          else
+            out[#out + 1] = "(null)"   -- nil/number/boolean have no pointer
+          end
+        elseif conv == "q" then
+          if spec ~= "%q" then
+            I:rt_error("specifier '%q' cannot have modifiers")
+          end
+          argi = argi + 1
+          local v = args[argi]
+          if type(v) == "string" or type(v) == "number"
+             or type(v) == "boolean" or v == nil then
+            out[#out + 1] = string.format("%q", v)
+          else
+            argerror(I, argi, "format", "value has no literal form")
+          end
         else
           I:rt_error("invalid conversion '" .. spec .. "' to 'format'")
         end

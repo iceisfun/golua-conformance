@@ -133,7 +133,7 @@ local function install_base(I)
 
   def("rawget", function(I, args)
     local t = check_table(I, args, 1, "rawget")
-    return R(t.hash[rt.normalize_key(args[2])])
+    return R(rt.rawget(t, rt.normalize_key(args[2])))
   end)
 
   def("rawset", function(I, args)
@@ -141,7 +141,7 @@ local function install_base(I)
     local k = rt.normalize_key(args[2])
     if k == nil then I:rt_error("table index is nil") end
     if type(k) == "number" and k ~= k then I:rt_error("table index is NaN") end
-    t.hash[k] = args[3]
+    rt.rawset(t, k, args[3])
     return R(t)
   end)
 
@@ -153,7 +153,7 @@ local function install_base(I)
   def("rawlen", function(I, args)
     local v = args[1]
     if type(v) == "string" then return R(#v) end
-    if rt.is_table(v) then return R(#v.hash) end
+    if rt.is_table(v) then return R(rt.border(v.hash)) end
     argerror(I, 1, "rawlen", "table or string expected")
   end)
 
@@ -246,7 +246,7 @@ local function install_base(I)
   def("next", function(I, args)
     local t = check_table(I, args, 1, "next")
     local k = rt.normalize_key(args[2])
-    local nk, nv = next(t.hash, k)
+    local nk, nv = rt.tnext(t, k)
     if nk == nil then return R(nil) end
     return R(nk, nv)
   end)
@@ -623,19 +623,20 @@ local function install_table(I)
   G.hash["table"] = lib
   local function def(name, fn) lib.hash[name] = fn end
 
+  local rget, rset, rgetn = rt.rawget, rt.rawset, rt.getn
+
   def("insert", function(I, args)
     local t = check_table(I, args, 1, "insert")
-    local h = t.hash
-    local len = #h
+    local len = rgetn(t)
     if args.n == 2 then
-      h[len + 1] = args[2]
+      rset(t, len + 1, args[2])
     elseif args.n == 3 then
       local pos = check_int(I, args, 2, "insert")
       if pos < 1 or pos > len + 1 then
         argerror(I, 2, "insert", "position out of bounds")
       end
-      for i = len, pos, -1 do h[i + 1] = h[i] end
-      h[pos] = args[3]
+      for i = len, pos, -1 do rset(t, i + 1, rget(t, i)) end
+      rset(t, pos, args[3])
     else
       I:rt_error("wrong number of arguments to 'insert'")
     end
@@ -644,19 +645,18 @@ local function install_table(I)
 
   def("remove", function(I, args)
     local t = check_table(I, args, 1, "remove")
-    local h = t.hash
-    local len = #h
+    local len = rgetn(t)
     local pos = opt_int(I, args, 2, "remove", len)
     if len == 0 and args.n < 2 then return R(nil) end
     if len + 1 == pos then
-      local v = h[pos]; h[pos] = nil; return R(v)
+      local v = rget(t, pos); rset(t, pos, nil); return R(v)
     end
     if args.n >= 2 and (pos < 1 or pos > len + 1) and len > 0 then
       argerror(I, 2, "remove", "position out of bounds")
     end
-    local v = h[pos]
-    for i = pos, len - 1 do h[i] = h[i + 1] end
-    h[len] = nil
+    local v = rget(t, pos)
+    for i = pos, len - 1 do rset(t, i, rget(t, i + 1)) end
+    rset(t, len, nil)
     return R(v)
   end)
 
@@ -665,16 +665,17 @@ local function install_table(I)
     local sep = args[2]
     if sep == nil then sep = "" else sep = check_str(I, args, 2, "concat") end
     local i = opt_int(I, args, 3, "concat", 1)
-    local j = opt_int(I, args, 4, "concat", #t.hash)
+    local j = opt_int(I, args, 4, "concat", rgetn(t))
     local out = {}
     for k = i, j do
-      local v = t.hash[k]
+      local v = rget(t, k)
       if type(v) == "string" then
         out[#out + 1] = v
       elseif type(v) == "number" then
         out[#out + 1] = I:number_tostring(v)
       else
-        I:rt_error(hostfmt("invalid value (at index %d) in table for 'concat'", k))
+        I:rt_error(hostfmt("invalid value (%s) at index %d in table for 'concat'",
+          rt.typename(v), k))
       end
     end
     return R(table.concat(out, sep))
@@ -683,40 +684,38 @@ local function install_table(I)
   def("unpack", function(I, args)
     local t = check_table(I, args, 1, "unpack")
     local i = opt_int(I, args, 2, "unpack", 1)
-    local j = opt_int(I, args, 3, "unpack", #t.hash)
+    local j = opt_int(I, args, 3, "unpack", rgetn(t))
     local out = { n = math.max(0, j - i + 1) }
-    for k = i, j do out[k - i + 1] = t.hash[k] end
+    for k = i, j do out[k - i + 1] = rget(t, k) end
     return out
   end)
   G.hash["unpack"] = nil  -- not a global in 5.4+
 
   def("pack", function(I, args)
-    local t = rt.new_table()
-    for i = 1, args.n do t.hash[i] = args[i] end
-    t.hash["n"] = args.n
+    local t = rt.new_table(args.n)
+    for i = 1, args.n do rset(t, i, args[i]) end
+    rset(t, "n", args.n)
     return R(t)
   end)
 
   def("create", function(I, args)
-    -- table.create(nseq [, nrec]) -- pre-sizing is a no-op for us
-    check_int(I, args, 1, "create")
+    local n = check_int(I, args, 1, "create")
     if args[2] ~= nil then check_int(I, args, 2, "create") end
-    return R(rt.new_table())
+    return R(rt.new_table(n >= 0 and n or 0))
   end)
 
   def("move", function(I, args)
     local a1 = check_table(I, args, 1, "move")
     local f = check_int(I, args, 2, "move")
     local e = check_int(I, args, 3, "move")
-    local t = check_int(I, args, 4, "move")
+    local d = check_int(I, args, 4, "move")
     local a2 = args[5]
     if a2 == nil then a2 = a1 else a2 = check_table(I, args, 5, "move") end
-    local h1, h2 = a1.hash, a2.hash
     if e >= f then
-      if t > f and t <= e and a1 == a2 then
-        for i = e, f, -1 do h2[t + (i - f)] = h1[i] end
+      if d > f and d <= e and a1 == a2 then
+        for i = e, f, -1 do rset(a2, d + (i - f), rget(a1, i)) end
       else
-        for i = f, e do h2[t + (i - f)] = h1[i] end
+        for i = f, e do rset(a2, d + (i - f), rget(a1, i)) end
       end
     end
     return R(a2)
@@ -725,10 +724,12 @@ local function install_table(I)
   def("sort", function(I, args)
     local t = check_table(I, args, 1, "sort")
     local comp = args[2]
-    local h = t.hash
-    local n = #h
+    if comp ~= nil and not rt.is_callable(comp) then
+      typeerror(I, 2, "sort", "function", args)
+    end
+    local n = rgetn(t)
     local arr = {}
-    for i = 1, n do arr[i] = h[i] end
+    for i = 1, n do arr[i] = rget(t, i) end
     local less
     if comp == nil then
       less = function(x, y) return I:lt(x, y) end
@@ -737,15 +738,8 @@ local function install_table(I)
         return rt.truthy(I:call(comp, { x, y, n = 2 })[1])
       end
     end
-    -- use host sort but guard invalid order function errors
-    local ok, err = pcall(table.sort, arr, less)
-    if not ok then
-      if type(err) == "table" and getmetatable(err) == I.GUEST_ERR_MT then
-        error(err, 0)
-      end
-      I:rt_error("invalid order function for sorting")
-    end
-    for i = 1, n do h[i] = arr[i] end
+    rt.sort(I, arr, n, less)
+    for i = 1, n do rset(t, i, arr[i]) end
     return EMPTY
   end)
 end

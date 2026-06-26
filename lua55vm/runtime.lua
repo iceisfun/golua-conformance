@@ -26,6 +26,7 @@ local mtype   = math.type
 local tointeger = math.tointeger
 local floor   = math.floor
 local hostfmt = string.format
+local hostnext = next
 
 -- ---------------------------------------------------------------------------
 -- Constructors / predicates
@@ -58,8 +59,187 @@ function M.shortsrc(source)
   end
 end
 
-function M.new_table()
-  return setmetatable({ hash = {}, meta = nil }, TABLE_MT)
+-- A guest table has an array part (arr[1..asize], holes allowed), a hash part
+-- (host table, for everything else), and a length hint, mirroring Lua's own
+-- table so the length operator and iteration are our own logic.
+function M.new_table(narr)
+  narr = narr or 0
+  return setmetatable({
+    arr = {}, asize = narr, hash = {}, lenhint = narr // 2, meta = nil,
+  }, TABLE_MT)
+end
+
+local hostrawget = rawget
+
+-- raw get on the array/hash split (k must be normalized)
+function M.rawget(t, k)
+  if type(k) == "number" and mtype(k) == "integer" and k >= 1 and k <= t.asize then
+    return t.arr[k]
+  end
+  return t.hash[k]
+end
+
+-- raw set (k must be normalized and validated non-nil/non-NaN)
+function M.rawset(t, k, v)
+  if type(k) == "number" and mtype(k) == "integer" then
+    if k >= 1 and k <= t.asize then
+      t.arr[k] = v
+      return
+    elseif k == t.asize + 1 and v ~= nil then
+      -- extend the array part, absorbing any contiguous keys from the hash part
+      t.asize = t.asize + 1
+      t.arr[t.asize] = v
+      local nx = t.hash[t.asize + 1]
+      while nx ~= nil do
+        t.asize = t.asize + 1
+        t.arr[t.asize] = nx
+        t.hash[t.asize] = nil
+        nx = t.hash[t.asize + 1]
+      end
+      t.lenhint = t.asize // 2
+      return
+    end
+  end
+  t.hash[k] = v
+end
+
+-- bulk array set used by table constructors (SETLIST): place count values from
+-- src[base+1..] at indices [start+1 .. start+count], sizing the array part.
+function M.setlist(t, start, vals, vbase, count)
+  for i = 1, count do
+    t.arr[start + i] = vals[vbase + i]
+  end
+  if start + count > t.asize then
+    t.asize = start + count
+    t.lenhint = t.asize // 2
+  end
+end
+
+local function arr_empty(t, i) return t.arr[i] == nil end
+
+local function binsearch(t, i, j)
+  while j - i > 1 do
+    local m = (i + j) // 2
+    if arr_empty(t, m) then j = m else i = m end
+  end
+  return i
+end
+
+local function hash_search(t, j)
+  if j == 0 then j = 1 end
+  local i
+  while t.hash[j] ~= nil do
+    i = j
+    if j > 0x3FFFFFFFFFFFFFFF then
+      i = j
+      while t.hash[i + 1] ~= nil do i = i + 1 end
+      return i
+    end
+    j = j * 2
+  end
+  i = i or j // 2
+  while j - i > 1 do
+    local m = (i + j) // 2
+    if t.hash[m] == nil then j = m else i = m end
+  end
+  return i
+end
+
+-- Lua 5.5 luaH_getn: returns the first border, using a 4-step vicinity probe
+-- around the cached hint, then a binary search.  This makes # deterministic
+-- ("first hole") rather than "any border".
+function M.getn(t)
+  local asize = t.asize
+  if asize > 0 then
+    local maxvic = 4
+    local limit = t.lenhint
+    if limit == 0 then limit = 1 end
+    if limit > asize then limit = asize end
+    if arr_empty(t, limit) then
+      for _ = 1, maxvic do
+        if limit <= 1 then break end
+        limit = limit - 1
+        if not arr_empty(t, limit) then t.lenhint = limit; return limit end
+      end
+      local b = binsearch(t, 0, limit)
+      t.lenhint = b
+      return b
+    else
+      for _ = 1, maxvic do
+        if limit >= asize then break end
+        limit = limit + 1
+        if arr_empty(t, limit) then t.lenhint = limit - 1; return limit - 1 end
+      end
+      if arr_empty(t, asize) then
+        local b = binsearch(t, limit, asize)
+        t.lenhint = b
+        return b
+      end
+      t.lenhint = asize
+    end
+  end
+  if t.hash[asize + 1] == nil then return asize end
+  return hash_search(t, asize)
+end
+
+M.border = M.getn   -- back-compat alias
+
+-- native quicksort (median-of-three) with invalid-order detection, matching
+-- Lua's table.sort error "invalid order function for sorting".
+function M.sort(I, a, n, less)
+  local function auxsort(lo, up)
+    while lo < up do
+      if less(a[up], a[lo]) then a[lo], a[up] = a[up], a[lo] end
+      if up - lo == 1 then return end
+      local p = (lo + up) // 2
+      if less(a[p], a[lo]) then a[p], a[lo] = a[lo], a[p]
+      elseif less(a[up], a[p]) then a[p], a[up] = a[up], a[p] end
+      if up - lo == 2 then return end
+      a[p], a[up - 1] = a[up - 1], a[p]
+      local pivot = a[up - 1]
+      local i, j = lo, up - 1
+      while true do
+        i = i + 1
+        while less(a[i], pivot) do
+          if i >= up then I:rt_error("invalid order function for sorting") end
+          i = i + 1
+        end
+        j = j - 1
+        while less(pivot, a[j]) do
+          if j <= lo then I:rt_error("invalid order function for sorting") end
+          j = j - 1
+        end
+        if i >= j then break end
+        a[i], a[j] = a[j], a[i]
+      end
+      a[up - 1], a[i] = a[i], a[up - 1]
+      -- recurse into the smaller half, loop on the larger (bounded depth)
+      if i - lo < up - i then
+        auxsort(lo, i - 1); lo = i + 1
+      else
+        auxsort(i + 1, up); up = i - 1
+      end
+    end
+  end
+  auxsort(1, n)
+end
+
+-- iteration (Lua's next): array part in order, then the hash part
+function M.tnext(t, k)
+  local asize = t.asize
+  if k == nil then
+    for i = 1, asize do
+      if t.arr[i] ~= nil then return i, t.arr[i] end
+    end
+    return hostnext(t.hash)
+  end
+  if type(k) == "number" and mtype(k) == "integer" and k >= 1 and k <= asize then
+    for i = k + 1, asize do
+      if t.arr[i] ~= nil then return i, t.arr[i] end
+    end
+    return hostnext(t.hash)
+  end
+  return hostnext(t.hash, k)
 end
 
 function M.is_table(v)   return type(v) == "table" and getmetatable(v) == TABLE_MT end
@@ -171,7 +351,7 @@ function M.install(Interp)
 
   function Interp:index(t, k)
     if M.is_table(t) then
-      local v = t.hash[normalize_key(k)]
+      local v = M.rawget(t, normalize_key(k))
       if v ~= nil then return v end
       local mt = t.meta
       if mt == nil then return nil end
@@ -197,8 +377,8 @@ function M.install(Interp)
   function Interp:setindex(t, k, v)
     if M.is_table(t) then
       local nk = normalize_key(k)
-      if t.hash[nk] ~= nil then
-        t.hash[nk] = v
+      if M.rawget(t, nk) ~= nil then
+        M.rawset(t, nk, v)
         return
       end
       local mt = t.meta
@@ -209,7 +389,7 @@ function M.install(Interp)
         if type(nk) == "number" and nk ~= nk then
           self:rt_error("table index is NaN")
         end
-        t.hash[nk] = v
+        M.rawset(t, nk, v)
         return
       end
       if M.is_callable(h) then
@@ -341,7 +521,7 @@ function M.install(Interp)
       local mt = v.meta
       local h = mt and mt.hash["__len"]
       if h ~= nil then return (self:call(h, { v, n = 1 }))[1] end
-      return #v.hash    -- delegate border-finding to host (identical algorithm)
+      return M.getn(v)
     end
     local h = self:metamethod(v, "__len")
     if h ~= nil then return (self:call(h, { v, n = 1 }))[1] end

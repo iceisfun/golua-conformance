@@ -49,8 +49,8 @@ local function main(argv)
 
   -- populate guest `arg` table
   local argt = rt.new_table()
-  argt.hash[0] = (chunkname:sub(1, 1) == "@") and chunkname:sub(2) or chunkname
-  for i, v in ipairs(prog_args) do argt.hash[i] = v end
+  rt.rawset(argt, 0, (chunkname:sub(1, 1) == "@") and chunkname:sub(2) or chunkname)
+  for i, v in ipairs(prog_args) do rt.rawset(argt, i, v) end
   I.globals.hash["arg"] = argt
 
   local ok, fn = pcall(function() return I:load(code, chunkname) end)

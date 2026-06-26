@@ -373,9 +373,7 @@ function Interp:exec_loop(frame)
       local t = R[a]
       local count = ins.b
       if count == 0 then count = frame.top - a - 1 end
-      local start = ins.c
-      local h = t.hash
-      for i = 1, count do h[start + i] = R[a + i] end
+      rt.setlist(t, ins.c, R, a, count)
     elseif op == "ADD" or op == "SUB" or op == "MUL" or op == "DIV"
         or op == "IDIV" or op == "MOD" or op == "POW"
         or op == "BAND" or op == "BOR" or op == "BXOR"

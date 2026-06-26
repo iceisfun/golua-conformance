@@ -852,6 +852,16 @@ local function install_math(I)
   def("modf", function(I, args)
     return R(math.modf(check_num(I, args, 1, "modf")))
   end)
+  if math.frexp then
+    def("frexp", function(I, args)
+      return R(math.frexp(check_num(I, args, 1, "frexp")))
+    end)
+  end
+  if math.ldexp then
+    def("ldexp", function(I, args)
+      return R(math.ldexp(check_num(I, args, 1, "ldexp"), check_int(I, args, 2, "ldexp")))
+    end)
+  end
   def("log", function(I, args)
     local x = check_num(I, args, 1, "log")
     if args[2] ~= nil then return R(math.log(x, check_num(I, args, 2, "log"))) end
@@ -1076,6 +1086,18 @@ local function install_io(I)
     local hostf, err = io.tmpfile()
     if not hostf then return R(nil, err) end
     return R(wrap_file(hostf))
+  end
+
+  if io.popen then
+    h["popen"] = function(I, args)
+      local cmd = check_str(I, args, 1, "popen")
+      local mode = args[2]
+      local hostf, err
+      if mode ~= nil then hostf, err = io.popen(cmd, check_str(I, args, 2, "popen"))
+      else hostf, err = io.popen(cmd) end
+      if not hostf then return R(nil, err) end
+      return R(wrap_file(hostf))
+    end
   end
 
   h["open"] = function(I, args)

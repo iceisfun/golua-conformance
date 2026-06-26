@@ -802,6 +802,12 @@ function Interp:protected(fn, args, handler)
     if type(e) == "table" and getmetatable(e) == self.GUEST_ERR_MT then return e.value end
     return "[internal] " .. tostring(e)
   end
+  -- On a stack-overflow error the depth counter is still at the limit (the
+  -- error path doesn't unwind it), so the message handler / to-be-closed
+  -- handlers would immediately overflow again. Lua reserves EXTRA stack for
+  -- exactly this; give the whole error-handling section headroom.
+  local saved_max = self.max_depth
+  self.max_depth = saved_max + 200
   -- run the message handler with the stack still intact (self.frames was not
   -- popped on the error path), so a traceback handler can inspect it
   local hresult
@@ -821,6 +827,7 @@ function Interp:protected(fn, args, handler)
     end
   end
   self.depth = saved_depth
+  self.max_depth = saved_max
   if handler then return false, hresult end
   return false, errval(res)
 end

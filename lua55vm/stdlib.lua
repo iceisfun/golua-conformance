@@ -943,29 +943,75 @@ local function install_math(I)
     return R(math.ult(x, y))
   end)
 
-  -- random: use host math.random; seedable
-  def("random", function(I, args)
-    if args.n == 0 then return R(math.random()) end
-    local lo, hi
-    if args.n == 1 then
-      local m = check_int(I, args, 1, "random")
-      if m == 0 then
-        -- math.random(0): a full-range random integer
-        return R(math.random(math.mininteger, math.maxinteger))
-      end
-      lo, hi = 1, m
-    else
-      lo, hi = check_int(I, args, 1, "random"), check_int(I, args, 2, "random")
+  -- Native xoshiro256** PRNG, matching Lua 5.5 (lmathlib.c) bit-for-bit.
+  -- Lua integers are 64-bit signed; '<<' wraps and '>>' is a logical shift,
+  -- so the C unsigned-64 operations translate directly.
+  local SCALE53 = 2.0 ^ -53      -- scaleFIG for FIGS = 53 (double mantissa)
+  local function rotl(x, n) return (x << n) | (x >> (64 - n)) end
+  local function nextrand(s)
+    local st0, st1 = s[1], s[2]
+    local st2 = s[3] ~ st0
+    local st3 = s[4] ~ st1
+    local res = rotl(st1 * 5, 7) * 9
+    s[1] = st0 ~ st3
+    s[2] = st1 ~ st2
+    s[3] = st2 ~ (st1 << 17)
+    s[4] = rotl(st3, 45)
+    return res
+  end
+  local function setseed(s, n1, n2)
+    s[1] = n1; s[2] = 0xff; s[3] = n2; s[4] = 0   -- 0xff avoids a zero state
+    for _ = 1, 16 do nextrand(s) end              -- "spread" the seed
+    return n1, n2
+  end
+  local function I2d(x)                            -- Rand64 -> float in [0,1)
+    return ((x >> 11) + 0.0) * SCALE53
+  end
+  local function project(ran, n, s)               -- random int in [0, n]
+    local lim, sh = n, 1
+    while (lim & (lim + 1)) ~= 0 do               -- spread 1s -> Mersenne number
+      lim = lim | (lim >> sh); sh = sh * 2
     end
-    if lo > hi then argerror(I, args.n, "random", "interval is empty") end
-    return R(math.random(lo, hi))
+    ran = ran & lim
+    while math.ult(n, ran) do ran = nextrand(s) & lim end   -- reject ran > n
+    return ran
+  end
+
+  -- seed the generator at startup with a host-derived value (real Lua uses a
+  -- random seed; tests reseed explicitly before checking exact output)
+  local state = { 0, 0, 0, 0 }
+  I.rng_state = state
+  setseed(state, (os.time() or 0) ~ (math.floor((os.clock() or 0) * 1e6)), 0)
+
+  def("random", function(I, args)
+    local s = I.rng_state
+    local rv = nextrand(s)
+    if args.n == 0 then return R(I2d(rv)) end
+    local low, up
+    if args.n == 1 then
+      up = check_int(I, args, 1, "random")
+      if up == 0 then return R(rv) end            -- math.random(0): full integer
+      low = 1
+    elseif args.n == 2 then
+      low = check_int(I, args, 1, "random")
+      up = check_int(I, args, 2, "random")
+    else
+      I:rt_error("wrong number of arguments")
+    end
+    if low > up then argerror(I, 1, "random", "interval is empty") end
+    return R(project(rv, up - low, s) + low)
   end)
   def("randomseed", function(I, args)
-    -- returns the two seed components actually used (Lua 5.4+)
-    if args[1] ~= nil then
-      return R(math.randomseed(check_num(I, args, 1, "randomseed")))
+    local s = I.rng_state
+    local n1, n2
+    if args.n == 0 then
+      n1 = (os.time() or 0) ~ (math.floor((os.clock() or 0) * 1e6))
+      n2 = nextrand(s)
+    else
+      n1 = check_int(I, args, 1, "randomseed")
+      n2 = (args.n >= 2) and check_int(I, args, 2, "randomseed") or 0
     end
-    return R(math.randomseed())
+    return R(setseed(s, n1, n2))
   end)
 end
 

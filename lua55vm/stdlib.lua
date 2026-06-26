@@ -1807,10 +1807,14 @@ local function install_package(I)
       loaded.hash[name] = v
       return R(v)
     end
-    -- search package.path
+    -- search package.path (which must be a string)
     local path = pkg.hash["path"]
+    if type(path) ~= "string" then
+      I:rt_error("'package.path' must be a string")
+    end
     local relname = name:gsub("%.", "/")
-    local tried = {}
+    -- error message accumulates the searchers tried, like luaL_findfile
+    local tried = { "\n\tno field package.preload['" .. name .. "']" }
     for tmpl in path:gmatch("[^;]+") do
       local fname = tmpl:gsub("%?", relname)
       local fh = io.open(fname, "rb")
@@ -1824,6 +1828,13 @@ local function install_package(I)
         return R(v)
       end
       tried[#tried + 1] = "\n\tno file '" .. fname .. "'"
+    end
+    -- C path: we cannot load C libraries, so every template is a miss
+    local cpath = pkg.hash["cpath"]
+    if type(cpath) == "string" then
+      for tmpl in cpath:gmatch("[^;]+") do
+        tried[#tried + 1] = "\n\tno file '" .. tmpl:gsub("%?", relname) .. "'"
+      end
     end
     I:rt_error("module '" .. name .. "' not found:" .. table.concat(tried))
   end

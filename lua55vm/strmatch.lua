@@ -243,21 +243,29 @@ function MS:match_(si, pi)
         local res = self:match_capture(si, nc)
         if res then si = res; pi = pi + 2 else return nil end
       else
-        return self:default_match(si, pi)
+        -- default: a single-char class (%a etc.), possibly with a suffix
+        local r, nsi, npi = self:default_match(si, pi)
+        if r ~= "cont" then return r end
+        si = nsi; pi = npi                       -- loop instead of recursing
       end
     else
-      return self:default_match(si, pi)
+      local r, nsi, npi = self:default_match(si, pi)
+      if r ~= "cont" then return r end
+      si = nsi; pi = npi                         -- loop instead of recursing
     end
   end
   return si
 end
 
+-- Match a single-char class at `pi` (with optional quantifier suffix). Returns
+-- either ("cont", si, pi) to continue the outer match loop (no recursion, so
+-- long literal patterns don't blow the depth limit), or a final result/nil.
 function MS:default_match(si, pi)
   local ep = self:classend(pi)
   if not self:single_match(si, pi, ep) then
     local epc = byte(self.p, ep)
-    if epc == 42 or epc == 63 or epc == 45 then  -- '*' '?' '-'
-      return self:match(si, ep + 1)
+    if epc == 42 or epc == 63 or epc == 45 then  -- '*' '?' '-' : match zero
+      return "cont", si, ep + 1
     end
     return nil
   end
@@ -265,7 +273,7 @@ function MS:default_match(si, pi)
   if epc == 63 then                              -- '?'
     local res = self:match(si + 1, ep + 1)
     if res then return res end
-    return self:match(si, ep + 1)
+    return "cont", si, ep + 1
   elseif epc == 43 then                          -- '+'
     return self:max_expand(si + 1, pi, ep)
   elseif epc == 42 then                          -- '*'
@@ -273,7 +281,7 @@ function MS:default_match(si, pi)
   elseif epc == 45 then                          -- '-'
     return self:min_expand(si, pi, ep)
   else
-    return self:match(si + 1, ep)
+    return "cont", si + 1, ep                    -- no suffix: advance and loop
   end
 end
 

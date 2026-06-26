@@ -46,6 +46,10 @@ G.hash["package"].hash["path"] =
 local f, err = io.open(path, "rb")
 if not f then io.stderr:write("cannot open " .. path .. ": " .. tostring(err) .. "\n"); os.exit(1) end
 local src = f:read("a"); f:close()
+if src:sub(1, 1) == "#" then               -- skip a leading shebang line
+  local nl = src:find("\n", 1, true)
+  src = nl and src:sub(nl) or ""
+end
 
 local ok, fn = pcall(function() return I:load(src, "@" .. path) end)
 if not ok then

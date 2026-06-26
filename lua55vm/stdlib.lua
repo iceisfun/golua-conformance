@@ -328,6 +328,12 @@ local function install_base(I)
     local src = f:read("a"); f:close()
     -- skip a leading BOM
     if src:sub(1, 3) == "\239\187\191" then src = src:sub(4) end
+    -- skip a leading shebang line ('#...'), keeping the newline so that line
+    -- numbers stay correct (code that followed on line 2 still reports line 2)
+    if src:sub(1, 1) == "#" then
+      local nl = src:find("\n", 1, true)
+      src = nl and src:sub(nl) or ""
+    end
     local ok, fn = pcall(function()
       return I:load(src, "@" .. path, env, env ~= nil)
     end)
@@ -407,7 +413,9 @@ local function install_base(I)
       if type(msg) == "table" and getmetatable(msg) == I.GUEST_ERR_MT then
         msg = msg.value
       end
-      return R(nil, tostring((msg):gsub("^.-:%d+: ", "")))
+      -- Lua returns the full compile error, including the "chunkname:line:"
+      -- prefix (and "near '<token>'" suffix), unchanged.
+      return R(nil, tostring(msg))
     end
   end)
 end

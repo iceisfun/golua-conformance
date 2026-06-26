@@ -42,18 +42,20 @@ function Lexer.new(src, chunkname)
   self.line = 1
   self.chunkname = chunkname or "?"
   self.len = #src
-  -- skip a leading shebang line (#!...)
-  if src:sub(1, 1) == "#" then
-    while self.pos <= self.len and self.src:sub(self.pos, self.pos) ~= "\n" do
-      self.pos = self.pos + 1
-    end
-  end
+  -- NOTE: shebang ('#...') skipping is done by the file loaders (loadfile /
+  -- dofile / require), NOT here -- load(string) must not skip a leading '#'.
   return self
 end
 
-function Lexer:error(msg, line)
+function Lexer:error(msg, line, near)
   line = line or self.line
-  error(string.format("%s:%d: %s", self.chunkname, line, msg), 0)
+  local s = string.format("%s:%d: %s", self.chunkname, line, msg)
+  if near == "<eof>" then        -- <eof> token is printed unquoted, like Lua
+    s = s .. " near <eof>"
+  elseif near ~= nil then
+    s = s .. " near '" .. near .. "'"
+  end
+  error(s, 0)
 end
 
 function Lexer:peek(o)
@@ -90,7 +92,8 @@ function Lexer:read_long(level, is_comment)
   while true do
     c = self:peek()
     if c == nil then
-      self:error((is_comment and "unfinished long comment" or "unfinished long string"))
+      self:error((is_comment and "unfinished long comment" or "unfinished long string"),
+        nil, "<eof>")
     elseif c == "]" then
       -- check for closing bracket of matching level
       local save = self.pos
@@ -216,20 +219,25 @@ local function utf8_encode(cp)
 end
 
 function Lexer:read_short_string()
+  local startpos = self.pos          -- opening delimiter (for "near" messages)
   local quote = self:advance()
   local line = self.line
   local parts = {}
+  -- raw source consumed so far, quoted, matching Lua's error-buffer ("near")
+  local function serr(msg) self:error(msg, line, self.src:sub(startpos, self.pos)) end
   while true do
     local c = self:peek()
-    if c == nil or c == "\n" or c == "\r" then
-      self:error("unfinished string", line)
+    if c == nil then
+      self:error("unfinished string", line, "<eof>")
+    elseif c == "\n" or c == "\r" then
+      self:error("unfinished string", line, self.src:sub(startpos, self.pos - 1))
     elseif c == quote then
       self.pos = self.pos + 1
       break
     elseif c == "\\" then
       self.pos = self.pos + 1
       local e = self:peek()
-      if e == nil then self:error("unfinished string", line) end
+      if e == nil then self:error("unfinished string", line, "<eof>") end
       local simple = SHORT_ESCAPES[e]
       if simple then
         parts[#parts + 1] = simple
@@ -240,9 +248,8 @@ function Lexer:read_short_string()
       elseif e == "x" then
         self.pos = self.pos + 1
         local h1, h2 = self:peek(), self:peek(1)
-        if not (is_hex(h1) and is_hex(h2)) then
-          self:error("hexadecimal digit expected", line)
-        end
+        if not is_hex(h1) then serr("hexadecimal digit expected") end
+        if not is_hex(h2) then self.pos = self.pos + 1; serr("hexadecimal digit expected") end
         parts[#parts + 1] = string.char(tonumber(h1 .. h2, 16))
         self.pos = self.pos + 2
       elseif e == "z" then
@@ -255,15 +262,18 @@ function Lexer:read_short_string()
         end
       elseif e == "u" then
         self.pos = self.pos + 1
-        if self:peek() ~= "{" then self:error("missing '{' in \\u{xxxx}", line) end
+        if self:peek() ~= "{" then serr("missing '{'") end
         self.pos = self.pos + 1
-        if not is_hex(self:peek()) then self:error("hexadecimal digit expected", line) end
+        if not is_hex(self:peek()) then serr("hexadecimal digit expected") end
         local cp = 0
         while is_hex(self:peek()) do
           cp = cp * 16 + tonumber(self:advance(), 16)
-          if cp > 0x7FFFFFFF then self:error("UTF-8 value too large", line) end
+          if cp > 0x7FFFFFFF then
+            self:error("UTF-8 value too large", line,
+              self.src:sub(startpos, self.pos - 1))
+          end
         end
-        if self:peek() ~= "}" then self:error("missing '}' in \\u{xxxx}", line) end
+        if self:peek() ~= "}" then serr("missing '}'") end
         self.pos = self.pos + 1
         parts[#parts + 1] = utf8_encode(cp)
       elseif is_digit(e) then
@@ -273,10 +283,10 @@ function Lexer:read_short_string()
           num = num * 10 + tonumber(self:advance())
           n = n + 1
         end
-        if num > 255 then self:error("decimal escape too large", line) end
+        if num > 255 then serr("decimal escape too large") end
         parts[#parts + 1] = string.char(num)
       else
-        self:error("invalid escape sequence '\\" .. e .. "'", line)
+        serr("invalid escape sequence")
       end
     else
       parts[#parts + 1] = c

@@ -1431,6 +1431,27 @@ local function install_debug(I)
     return R(nil)
   end)
 
+  def("setlocal", function(I, args)
+    local idx = 1
+    if rt.is_thread(args[1]) then idx = 2 end
+    local level = check_int(I, args, idx, "setlocal")
+    local n = check_int(I, args, idx + 1, "setlocal")
+    local value = args[idx + 2]
+    local frame = I.frames[#I.frames - level]
+    if frame == nil or frame.native or not frame.proto then return R(nil) end
+    local count = 0
+    for _, lv in ipairs(frame.proto.locvars) do
+      if lv.startpc <= frame.savedpc and (lv.endpc == nil or frame.savedpc < lv.endpc) then
+        count = count + 1
+        if count == n then
+          frame.R[lv.reg] = value
+          return R(lv.name)
+        end
+      end
+    end
+    return R(nil)
+  end)
+
   def("getupvalue", function(I, args)
     local f = args[1]
     local n = check_int(I, args, 2, "getupvalue")

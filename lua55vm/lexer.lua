@@ -42,6 +42,10 @@ function Lexer.new(src, chunkname)
   self.line = 1
   self.chunkname = chunkname or "?"
   self.len = #src
+  -- per-chunk string cache: identical string literals share one host object
+  -- (like Lua's luaX_newstring), so '%p'/topointer identity matches even for
+  -- long strings across different functions in the same chunk.
+  self.strcache = {}
   -- NOTE: shebang ('#...') skipping is done by the file loaders (loadfile /
   -- dofile / require), NOT here -- load(string) must not skip a leading '#'.
   return self
@@ -293,7 +297,15 @@ function Lexer:read_short_string()
       self.pos = self.pos + 1
     end
   end
-  return { type = "string", value = table.concat(parts), line = line }
+  return { type = "string", value = self:intern(table.concat(parts)), line = line }
+end
+
+-- return the shared host string for this literal content (per-chunk interning)
+function Lexer:intern(s)
+  local c = self.strcache[s]
+  if c then return c end
+  self.strcache[s] = s
+  return s
 end
 
 function Lexer:next_token()
@@ -326,7 +338,7 @@ function Lexer:next_token()
     local level = self:try_long_bracket()
     if level then
       local s = self:read_long(level, false)
-      return { type = "string", value = s, line = line }
+      return { type = "string", value = self:intern(s), line = line }
     end
     -- otherwise fall through to operator handling for a lone '['
   end

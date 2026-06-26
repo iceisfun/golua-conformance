@@ -625,11 +625,20 @@ local function install_string(I)
           argi = argi + 1
           out[#out + 1] = hostfmt(spec, I:tostring(args[argi]))
         elseif conv == "p" then
+          -- '%p' allows flags/width but NOT a precision (checkformat(...,0))
+          if spec:find("%.") then
+            I:rt_error(hostfmt("invalid conversion '%s' to 'format'", spec))
+          end
           argi = argi + 1
           local v = args[argi]
           local t = type(v)
           local ptr
-          if t == "string" or rt.is_table(v) or rt.is_closure(v)
+          if t == "string" then
+            -- guest strings are host strings: use the host object's real
+            -- address so identity matches Lua (short strings interned/shared,
+            -- distinct long strings distinct -- see strings.lua/literals.lua)
+            ptr = hostfmt("%p", v)
+          elseif rt.is_table(v) or rt.is_closure(v)
              or rt.is_thread(v) or t == "function" then
             ptr = hostfmt("0x%012x", I:object_id(v))
           else

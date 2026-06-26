@@ -1,0 +1,3 @@
+count=800 depth=50 ref=lua5.5.0
+PASS=800  DIFF=0  RESOURCE=0  NONDET=0  INVALID=0
+differential_failures=0

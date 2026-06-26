@@ -33,10 +33,46 @@ Env:
 import argparse
 import math
 import os
+import random
 import struct
 import subprocess
 import sys
 import tempfile
+
+
+def rand_double_literals(n, seed):
+    """N random FINITE doubles as exact hex-float Lua literals (parsed bit-exact
+    by both engines). These feed ONLY the EXACT unary functions (sqrt is IEEE
+    correctly-rounded; floor/ceil/abs/modf/tointeger/type are algebraic), where
+    a difference at tolerance 0 is a genuine structural bug at ANY magnitude.
+
+    Transcendentals are deliberately NOT fed random doubles: their large-
+    argument divergence (Go math vs platform libm argument reduction — 100s to
+    1000s of ULP once |x| is large, tan worst because of its poles) is inherent
+    and documented (golua wontfix/libm-last-ulp), so feeding them random
+    magnitudes only manufactures noise. Four strategies: uniform bit pattern,
+    mantissa x 2^exp over all magnitudes, decimal n/10^k, near-int/near-half."""
+    rng = random.Random(seed)
+    out = []
+    while len(out) < n:
+        s = rng.randint(0, 3)
+        if s == 0:
+            d = struct.unpack("<d", struct.pack("<Q", rng.getrandbits(64)))[0]
+        elif s == 1:
+            d = math.ldexp(rng.getrandbits(53), rng.randint(-1074, 970))
+            if rng.random() < 0.5:
+                d = -d
+        elif s == 2:
+            num = rng.randint(-10**rng.randint(1, 18), 10**rng.randint(1, 18))
+            d = num / (10 ** rng.randint(0, 18))
+        else:
+            d = rng.randint(-10**12, 10**12) + rng.choice([0.0, 0.5, 0.25, -0.5])
+        if math.isfinite(d):
+            out.append("(" + float(d).hex() + ")")
+    return out
+
+
+RAND_INPUTS = []  # populated by --rand; consumed only by the EXACT unary fns
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, "corpus")
@@ -103,7 +139,7 @@ def make_cases():
     """Yield (id, lua_expr, exact) tuples for every deterministic case."""
     cid = 0
     for fn in EXACT_UNARY:
-        for a in ALL_INPUTS:
+        for a in ALL_INPUTS + RAND_INPUTS:
             yield ("u_%s_%d" % (fn, cid), "math.%s(%s)" % (fn, a), True); cid += 1
     for fn in TRANSC_UNARY:
         for a in ALL_INPUTS:
@@ -305,7 +341,13 @@ def main():
                          "bit-identical results)")
     ap.add_argument("--lua54", action="store_true",
                     help="diff the lua_5_4_8 branch against lua5.4.8")
+    ap.add_argument("--rand", type=int, default=0,
+                    help="append N random hex-float doubles to the battery")
+    ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
+
+    if args.rand:
+        RAND_INPUTS.extend(rand_double_literals(args.rand, args.seed))
 
     global GOLUA, REFLUA
     if args.lua54:

@@ -14,7 +14,9 @@ Values are emitted as tagged tuples consumed by emit.py:
   ('none',  None)                 # MISSING argument (omit it entirely)
 """
 
+import math
 import random
+import struct
 
 INT64_MAX = (1 << 63) - 1
 INT64_MIN = -(1 << 63)
@@ -101,13 +103,45 @@ FLOAT_BOUNDARIES = ["-0", 0.0, 1.0, -1.0, "+inf", "-inf", "nan",
                     2.2250738585072014e-308, 1e-300, 1e300, 99.99995, 9.999995e-05]
 
 
+def _rand_double(rng):
+    """A random FINITE double, drawn so that %g / %.Ng / %e rounding edges are
+    actually hit. Four strategies: random bit pattern (uniform over the
+    representable set), mantissa x 2^exp (uniform over magnitudes), decimal
+    n/10^k (stresses decimal rounding), and just-past-a-rounding-boundary
+    (n + 0.5*10^-k, where shortest-repr / fixed-precision rounding most often
+    disagrees between Go's strconv and C's printf)."""
+    s = rng.randint(0, 3)
+    if s == 0:
+        for _ in range(8):
+            bits = rng.getrandbits(64)
+            d = struct.unpack("<d", struct.pack("<Q", bits))[0]
+            if math.isfinite(d):
+                return d
+        return 1.0
+    if s == 1:
+        mant = rng.getrandbits(53)
+        exp = rng.randint(-1074, 970)
+        d = math.ldexp(mant, exp)
+        return -d if rng.random() < 0.5 else d
+    if s == 2:
+        num = rng.randint(-10**rng.randint(1, 18), 10**rng.randint(1, 18))
+        den = 10 ** rng.randint(0, 18)
+        return num / den
+    n = rng.randint(-10**6, 10**6)
+    k = rng.randint(0, 12)
+    return n + 0.5 * (10 ** -k)
+
+
 def _float_value(prof, rng):
     table = {
         "min": 5e-324, "max": 1.7976931348623157e308, "neg": -1.0,
         "zero": 0.0, "one": 1.0, "special": "nan", "inf": "+inf",
         "negzero": "-0", "pi": 3.141592653589793,
-        "rand": rng.choice(FLOAT_BOUNDARIES),
     }
+    if prof == "rand":
+        # mostly true random doubles, occasionally a curated boundary
+        return ("float", rng.choice(FLOAT_BOUNDARIES) if rng.random() < 0.15
+                else _rand_double(rng))
     return ("float", table.get(prof, 1.0))
 
 

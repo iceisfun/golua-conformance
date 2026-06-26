@@ -267,7 +267,10 @@ function M.typename(v)
   local t = type(v)
   if t == "table" then
     local mt = getmetatable(v)
-    if mt == TABLE_MT then return "table" end
+    if mt == TABLE_MT then
+      if v.is_userdata then return "userdata" end   -- file handles etc.
+      return "table"
+    end
     if mt == CLOSURE_MT then return "function" end
     if mt == THREAD_MT then return "thread" end
     return "userdata"

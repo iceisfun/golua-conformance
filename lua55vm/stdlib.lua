@@ -417,6 +417,10 @@ local function install_base(I)
       argerror(I, 1, "load", "string or function expected")
     end
 
+    -- the mode string may only contain 'b' and/or 't' (Lua's checkmode)
+    if mode ~= nil and mode:match("[^bt]") then
+      argerror(I, 3, "load", "invalid mode")
+    end
     local binary = dump.is_binary(src)
     local allow_t = (mode == nil) or mode:find("t", 1, true)
     local allow_b = (mode == nil) or mode:find("b", 1, true)
@@ -1122,6 +1126,15 @@ local function install_io(I)
     local f = args[1]
     return R(f.hash.__closed and "file (closed)" or "file (0x0)")
   end
+  -- a file is to-be-closable and finalizable: closing the underlying handle
+  local function close_handle(f)
+    if not f.is_std and not f.hash.__closed then
+      f.hash.__closed = true
+      pcall(function() f.hash.__file:close() end)
+    end
+  end
+  file_meta.hash["__close"] = function(I, args) close_handle(args[1]); return EMPTY end
+  file_meta.hash["__gc"] = function(I, args) close_handle(args[1]); return EMPTY end
 
   local function wrap_file(hostf)
     local fobj = rt.new_table()
@@ -1131,6 +1144,16 @@ local function install_io(I)
     return fobj
   end
   local function is_file(v) return rt.is_table(v) and v.meta == file_meta end
+
+  -- validate the self argument of a file method (FILE* expected)
+  local function check_file(I, args, fname)
+    local v = args[1]
+    if not is_file(v) then
+      local got = (args.n == 0) and "no value" or I:objtypename(v)
+      argerror(I, 1, fname, "FILE* expected, got " .. got)
+    end
+    return v
+  end
 
   local function norm_fmt(fmt)
     if type(fmt) == "string" then
@@ -1167,7 +1190,7 @@ local function install_io(I)
   end)
 
   fm("lines", function(I, args)
-    local hostf = args[1].hash.__file
+    local hostf = check_file(I, args, "lines").hash.__file
     local fmts = {}
     for i = 2, args.n do fmts[i - 1] = norm_fmt(args[i]) end
     local it = (#fmts > 0) and hostf:lines(unpack(fmts)) or hostf:lines()
@@ -1175,23 +1198,24 @@ local function install_io(I)
   end)
 
   fm("close", function(I, args)
-    local hostf = args[1].hash.__file
-    args[1].hash.__closed = true
-    local ok = hostf:close()
+    local f = check_file(I, args, "close")
+    if f.is_std then return R(nil, "cannot close standard file") end
+    f.hash.__closed = true
+    local ok = f.hash.__file:close()
     return R(ok)
   end)
 
   fm("flush", function(I, args)
-    args[1].hash.__file:flush(); return R(args[1])
+    check_file(I, args, "flush").hash.__file:flush(); return R(args[1])
   end)
 
   fm("seek", function(I, args)
-    local hostf = args[1].hash.__file
+    local hostf = check_file(I, args, "seek").hash.__file
     local whence = args[2] or "cur"
     local offset = opt_int(I, args, 3, "seek", 0)
-    local pos, err = hostf:seek(whence, offset)
+    local pos, err, code = hostf:seek(whence, offset)
     if pos then return R(pos) end
-    return R(nil, err)
+    return R(nil, err, code)   -- include the errno code (3rd value)
   end)
 
   fm("setvbuf", function(I, args)
@@ -1201,6 +1225,7 @@ local function install_io(I)
   local stdout = wrap_file(io.stdout)
   local stderr = wrap_file(io.stderr)
   local stdin = wrap_file(io.stdin)
+  stdout.is_std = true; stderr.is_std = true; stdin.is_std = true
   h["stdout"] = stdout
   h["stderr"] = stderr
   h["stdin"] = stdin
@@ -1229,6 +1254,11 @@ local function install_io(I)
     local name = check_str(I, args, 1, "open")
     local mode = args[2]
     if mode ~= nil then mode = check_str(I, args, 2, "open") else mode = "r" end
+    -- validate the mode string like Lua (l_checkmode): [rwa] %+? b?
+    if not mode:match("^[rwa]%+?b?$") then
+      argerror(I, 2, "open", hostfmt(
+        "invalid mode '%s' (should match '[rwa]%%+?b?')", mode))
+    end
     local hostf, err, code = io.open(name, mode)
     if not hostf then return R(nil, err, code) end
     return R(wrap_file(hostf))

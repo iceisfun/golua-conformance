@@ -80,6 +80,7 @@ end
 function Interp:close_upvals(frame, level, errobj)
   local pending = errobj
   if frame.tbc and #frame.tbc > 0 then
+    local base_n, base_d = #self.frames, self.depth
     for i = #frame.tbc, 1, -1 do
       local reg = frame.tbc[i]
       if reg >= level then
@@ -101,15 +102,14 @@ function Interp:close_upvals(frame, level, errobj)
             else
               args = { val, n = 1 }           -- normal close: __close(value)
             end
-            local saved_n, saved_d = #self.frames, self.depth
+            -- pop any frames a PREVIOUS errored close left behind, so each
+            -- handler runs at the same level (correct getinfo/traceback). The
+            -- last errored close's frames are left for the propagating traceback.
+            for j = #self.frames, base_n + 1, -1 do self.frames[j] = nil end
+            self.depth = base_d
+            self.next_callinfo = { what = "metamethod", name = "close" }
             local ok, err = pcall(self.call, self, h, args)
-            if not ok then
-              -- the failing __close left its frames on the stack; pop them so
-              -- error levels / tracebacks in later closes stay correct
-              for i = #self.frames, saved_n + 1, -1 do self.frames[i] = nil end
-              self.depth = saved_d
-              pending = err
-            end
+            if not ok then pending = err end
           end
         end
       end
@@ -224,6 +224,55 @@ function Interp:name_suffix(frame, reg)
   return ""
 end
 
+-- name (namewhat, name) of frame i, as seen from its caller (getfuncname)
+function Interp:frame_name(i)
+  local f = self.frames[i]
+  if f.callinfo then return f.callinfo.what, f.callinfo.name end
+  local caller = self.frames[i - 1]
+  if caller and not caller.native and caller.proto then
+    local ci = caller.proto.code[caller.savedpc]
+    if ci and (ci.op == "CALL" or ci.op == "TAILCALL") then
+      return self:reg_name(caller.cl, caller.savedpc, ci.a)
+    end
+  end
+  return nil
+end
+
+-- one traceback line for frame i (matches luaL_traceback formatting)
+function Interp:traceback_line(i)
+  local f = self.frames[i]
+  local what, name = self:frame_name(i)
+  local namepart
+  if what and name then namepart = what .. " '" .. name .. "'" end
+  if f.native then
+    return "[C]: in " .. (namepart or "?")
+  end
+  local p = f.proto
+  local line = p.lines[f.savedpc] or -1
+  if p.is_main then
+    return string.format("%s:%d: in main chunk", p.source, line)
+  end
+  if not namepart then
+    namepart = string.format("function <%s:%d>", p.source, p.line or 0)
+  end
+  return string.format("%s:%d: in %s", p.source, line, namepart)
+end
+
+-- build a stack traceback string (luaL_traceback). level 1 = caller of the
+-- traceback call (its own native frame is at the top of self.frames).
+function Interp:build_traceback(msg, level)
+  local out = {}
+  if msg ~= nil then out[#out + 1] = msg end
+  out[#out + 1] = "stack traceback:"
+  local frames = self.frames
+  local top = #frames - (level or 1)
+  for i = top, 1, -1 do
+    out[#out + 1] = "\t" .. self:traceback_line(i)
+  end
+  out[#out + 1] = "\t[C]: in ?"
+  return table.concat(out, "\n")
+end
+
 -- find the variable-name suffix for `value` among the registers recorded by
 -- the current op's error hint (used by arith/concat/len/unm error messages).
 function Interp:hint_for(value)
@@ -302,7 +351,9 @@ function Interp:run_closure(cl, args)
   local frame = {
     cl = cl, proto = proto, R = R, varargs = varargs,
     openuv = {}, tbc = {}, top = np, savedpc = 1,
+    callinfo = self.next_callinfo,   -- how this closure was invoked (metamethod)
   }
+  self.next_callinfo = nil
   self.frames[#self.frames + 1] = frame
 
   if self.hook and self.hook.call then self:fire_hook("call") end
@@ -721,34 +772,41 @@ function Interp:closure_from_proto(proto, env, has_env)
   return rt.new_closure(proto, upvals)
 end
 
--- protected call: restores frame stack/depth on error so the VM stays
--- consistent after a caught guest error.  Returns ok, results|errvalue.
-function Interp:protected(fn, args)
+-- protected call. With a message `handler`, it runs (like xpcall) BEFORE the
+-- stack unwinds, so debug.traceback can see the erroring frames. Returns
+-- ok, results|errvalue.
+function Interp:protected(fn, args, handler)
   local saved_n = #self.frames
   local saved_depth = self.depth
   local ok, res = pcall(function() return self:call(fn, args) end)
   if ok then
     return true, res
   end
-  -- unwind frame stack back to the protected point, running pending
-  -- to-be-closed handlers (inner frames first); a __close error replaces res.
-  -- Pop each frame BEFORE running its handler so nested calls during __close
-  -- (which push/pop via #self.frames) keep the array contiguous.
+  local function errval(e)
+    if type(e) == "table" and getmetatable(e) == self.GUEST_ERR_MT then return e.value end
+    return "[internal] " .. tostring(e)
+  end
+  -- run the message handler with the stack still intact (self.frames was not
+  -- popped on the error path), so a traceback handler can inspect it
+  local hresult
+  if handler then
+    local hok, hr = pcall(self.call, self, handler, { errval(res), n = 1 })
+    if hok then hresult = hr[1] else hresult = errval(hr) end
+  end
+  -- now unwind, running pending to-be-closed handlers (inner frames first); pop
+  -- each frame BEFORE running its handler so nested calls stay contiguous.
   while #self.frames > saved_n do
     local top = #self.frames
     local f = self.frames[top]
     self.frames[top] = nil
     if f and f.tbc and #f.tbc > 0 then
       local cok, cerr = pcall(self.close_upvals, self, f, 0, res)
-      if cok then res = cerr else res = cerr end   -- chained close error or raise
+      res = cerr
     end
   end
   self.depth = saved_depth
-  if type(res) == "table" and getmetatable(res) == self.GUEST_ERR_MT then
-    return false, res.value
-  end
-  -- internal/host error: surface as a guest string error
-  return false, "[internal] " .. tostring(res)
+  if handler then return false, hresult end
+  return false, errval(res)
 end
 
 return { Interp = Interp, rt = rt }

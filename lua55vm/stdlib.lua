@@ -238,14 +238,14 @@ local function install_base(I)
     local handler = args[2]
     local cargs = { n = args.n - 2 }
     for i = 3, args.n do cargs[i - 2] = args[i] end
-    local ok, res = I:protected(fn, cargs)
+    -- handler runs with the stack intact (inside protected, before unwinding)
+    local ok, res = I:protected(fn, cargs, handler)
     if ok then
       local out = { true, n = res.n + 1 }
       for i = 1, res.n do out[i + 1] = res[i] end
       return out
     else
-      local hres = I:call(handler, { res, n = 1 })
-      return R(false, hres[1])
+      return R(false, res)
     end
   end)
 
@@ -1364,23 +1364,13 @@ local function install_debug(I)
     local idx = 1
     if rt.is_thread(args[1]) then idx = 2 end
     local msg = args[idx]
-    if msg ~= nil and type(msg) ~= "string" then
-      return R(msg)   -- non-string message: returned unchanged
+    if msg ~= nil and type(msg) ~= "string" and type(msg) ~= "number" then
+      return R(msg)   -- non-string/number message: returned unchanged
     end
-    local lines = {}
-    if msg ~= nil then lines[#lines + 1] = msg end
-    lines[#lines + 1] = "stack traceback:"
-    local frames = I.frames
-    for i = #frames, 1, -1 do
-      local f = frames[i]
-      if f.native then
-        lines[#lines + 1] = "\t[C]: in ?"
-      elseif f.proto then
-        local line = f.proto.lines[f.savedpc] or 0
-        lines[#lines + 1] = string.format("\t%s:%d: in ?", f.proto.source, line)
-      end
-    end
-    return R(table.concat(lines, "\n"))
+    local level = opt_int(I, args, idx + 1, "traceback", 1)
+    -- level 1 = caller of traceback (build_traceback starts at #frames - level,
+    -- which skips traceback's own native frame at the top)
+    return R(I:build_traceback(msg, level))
   end)
 
   def("getinfo", function(I, args)

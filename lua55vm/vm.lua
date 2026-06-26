@@ -101,8 +101,15 @@ function Interp:close_upvals(frame, level, errobj)
             else
               args = { val, n = 1 }           -- normal close: __close(value)
             end
+            local saved_n, saved_d = #self.frames, self.depth
             local ok, err = pcall(self.call, self, h, args)
-            if not ok then pending = err end
+            if not ok then
+              -- the failing __close left its frames on the stack; pop them so
+              -- error levels / tracebacks in later closes stay correct
+              for i = #self.frames, saved_n + 1, -1 do self.frames[i] = nil end
+              self.depth = saved_d
+              pending = err
+            end
           end
         end
       end

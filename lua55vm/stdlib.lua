@@ -906,7 +906,7 @@ local function install_math(I)
     return R(math.log(x))
   end)
   def("max", function(I, args)
-    if args.n == 0 then argerror(I, 1, "max", "number expected, got no value") end
+    if args.n == 0 then argerror(I, 1, "max", "value expected") end
     local m = check_num(I, args, 1, "max")
     for i = 2, args.n do
       local v = check_num(I, args, i, "max")
@@ -915,7 +915,7 @@ local function install_math(I)
     return R(m)
   end)
   def("min", function(I, args)
-    if args.n == 0 then argerror(I, 1, "min", "number expected, got no value") end
+    if args.n == 0 then argerror(I, 1, "min", "value expected") end
     local m = check_num(I, args, 1, "min")
     for i = 2, args.n do
       local v = check_num(I, args, i, "min")
@@ -925,6 +925,7 @@ local function install_math(I)
   end)
   def("tointeger", function(I, args)
     local v = args[1]
+    if type(v) == "string" then v = tonumber(v) end   -- 5.5 coerces numeric strings
     if type(v) == "number" then return R(math.tointeger(v)) end
     return R(nil)
   end)

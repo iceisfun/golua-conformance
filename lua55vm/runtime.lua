@@ -494,7 +494,10 @@ function M.install(Interp)
       -- bitwise does not coerce strings: only two real numbers can reach the
       -- "no integer representation" case; otherwise it's a type error
       if type(a) == "number" and type(b) == "number" then
-        self:rt_error("number has no integer representation")
+        local bad
+        if toint(a) == nil then bad = a else bad = b end
+        self:rt_error("number" .. self:hint_for(bad)
+          .. " has no integer representation")
       end
       local bad
       if type(a) ~= "number" then bad = a else bad = b end
@@ -529,7 +532,9 @@ function M.install(Interp)
     if ia ~= nil then return ~ia end
     local h = self:metamethod(a, "__bnot")
     if h ~= nil then return (self:call(h, { a, a, n = 2 }))[1] end
-    if type(a) == "number" then self:rt_error("number has no integer representation") end
+    if type(a) == "number" then
+      self:rt_error("number" .. self:hint_for(a) .. " has no integer representation")
+    end
     self:rt_error("attempt to perform bitwise operation on a " .. self:objtypename(a)
       .. " value" .. self:hint_for(a))
   end

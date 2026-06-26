@@ -951,9 +951,11 @@ local function install_math(I)
     return R(math.random(lo, hi))
   end)
   def("randomseed", function(I, args)
-    if args[1] ~= nil then math.randomseed(check_num(I, args, 1, "randomseed"))
-    else math.randomseed() end
-    return EMPTY
+    -- returns the two seed components actually used (Lua 5.4+)
+    if args[1] ~= nil then
+      return R(math.randomseed(check_num(I, args, 1, "randomseed")))
+    end
+    return R(math.randomseed())
   end)
 end
 
@@ -1589,12 +1591,13 @@ local function install_package(I)
   pkg.hash["cpath"] = ""
   pkg.hash["config"] = "/\n;\n?\n!\n-\n"
 
-  -- register already-built-in libraries in package.loaded
+  -- register already-built-in libraries in package.loaded (incl. package itself)
   for _, name in ipairs({ "string", "table", "math", "os", "io",
                           "coroutine", "debug", "utf8" }) do
     if G.hash[name] then loaded.hash[name] = G.hash[name] end
   end
   loaded.hash["_G"] = G
+  loaded.hash["package"] = pkg
 
   pkg.hash["searchpath"] = function(I, args)
     local name = check_str(I, args, 1, "searchpath")

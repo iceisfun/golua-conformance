@@ -19,9 +19,18 @@ non-determinism guard, classifier, and an automatic stage-level reducer.
 * **Integer spine.** Each stage is an `int -> int` transform (`stages.py`);
   internally it is rich (builds strings, tables, coroutines, metatables,
   closures, iterators, patterns), but the value flowing *between* stages is a
-  single integer. This keeps composition trivial and the differential signal
-  unambiguous (`print(v)` at the end), with near-zero self-inflicted false
-  positives.
+  single integer. This keeps composition trivial and false positives near zero.
+* **Per-stage transcript + error capture (the observable).** The driver runs
+  each stage under `pcall` and records, for every stage, a transcript line that
+  is **either** its result **or** its caught error message *with line number*
+  (`i:name:VAL` / `i:name:ERR <chunk>:<line>: <msg>`). The full transcript is
+  diffed — not just a final integer — so the harness sees *intermediate* result
+  divergence **and** error-message/line-attribution divergence (e.g. a runtime
+  error reported on the wrong line, or worded differently). The caught error's
+  chunk name is the temp file's path, identical for the golua and reference runs
+  of the same file, so line + text compare directly. Error stages
+  (`err_*_ml`) deliberately split the faulting operator/field across lines to
+  stress line attribution. `v` is left unchanged when a stage errors.
 * **Determinism is enforced** by construction — stages use integer math only
   (no floats / `^` / `/`), never `math.random` / `os.*` / `io.*` /
   `collectgarbage`, never rely on `pairs` order, never `tostring` a table or

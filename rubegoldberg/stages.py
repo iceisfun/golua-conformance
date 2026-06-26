@@ -261,8 +261,82 @@ def shadow_scope(rng):
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# Error stages. These raise (sometimes conditionally, always deterministically)
+# so the driver's per-stage pcall captures the error MESSAGE + LINE into the
+# transcript. They deliberately spread the faulting operator/field across source
+# lines to exercise error-line attribution (the surface where golua and the
+# reference historically diverge). All raise *string* errors (or explicit
+# error("...")), never table objects, so the captured text is deterministic.
+# ---------------------------------------------------------------------------
+def err_index_ml(rng):
+    m = _pos(rng, 2, 5)
+    return (
+        "  local t\n"
+        f"  if x % {m} ~= 0 then t = {{ val = x }} end\n"
+        "  return t\n"
+        "    .val + 1\n"   # indexes nil when x % m == 0; '.val' on its own line
+    )
+
+
+def err_call_ml(rng):
+    m = _pos(rng, 2, 5)
+    return (
+        "  local f\n"
+        f"  if x % {m} == 0 then f = function(a) return a * 2 end end\n"
+        "  return f\n"
+        "    (x)\n"        # calls nil when x % m ~= 0; call on its own line
+    )
+
+
+def err_arith_ml(rng):
+    return (
+        "  local label = 'rg:'\n"
+        "  return x +\n"   # number + non-numeric string -> arithmetic error
+        "    label\n"
+    )
+
+
+def err_concat_ml(rng):
+    return (
+        "  local obj = setmetatable({}, {})\n"
+        "  local s = x .. '-' ..\n"   # concat a table w/o __concat -> error, multi-line
+        "    obj\n"
+        "  return #s\n"
+    )
+
+
+def err_compare_ml(rng):
+    m = _pos(rng, 2, 4)
+    return (
+        f"  if x % {m} == 0 then\n"
+        "    local r = {} <\n"        # compare table with number -> error, multi-line
+        "      x\n"
+        "    return r and 1 or 0\n"
+        "  end\n"
+        "  return x\n"
+    )
+
+
+def err_custom(rng):
+    m = _pos(rng, 3, 9)
+    lvl = rng.choice([0, 1, 2])
+    return (
+        f"  if x % {m} == 0 then\n"
+        f"    error('rg-custom-' .. (x % 100), {lvl})\n"
+        "  end\n"
+        "  return x\n"
+    )
+
+
 # All stage generators, by family. The generator picks from these.
 STAGES = {
+    "err_index_ml": err_index_ml,
+    "err_call_ml": err_call_ml,
+    "err_arith_ml": err_arith_ml,
+    "err_concat_ml": err_concat_ml,
+    "err_compare_ml": err_compare_ml,
+    "err_custom": err_custom,
     "arith_mix": arith_mix,
     "digit_sum": digit_sum,
     "prime_sieve": prime_sieve,

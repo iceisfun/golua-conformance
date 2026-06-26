@@ -83,14 +83,33 @@ def generate(rng, depth):
 
 
 def render(prog):
+    # Each stage runs under pcall so its result OR its error message+line is
+    # captured into a transcript line ("i:name:VAL" or "i:name:ERR <msg>").
+    # Comparing the whole transcript (not just a final integer) exposes
+    # intermediate result divergence AND error-message/line divergence. The
+    # caught error's chunk name is this temp file's path — identical for the
+    # golua and reference runs of the same file — so the line number and message
+    # text are compared directly. v is unchanged when a stage errors.
     out = ["-- rube goldberg machine: %d stages" % len(prog),
+           "local out = {}",
+           "local function obs(i, name, ok, r)",
+           "  local s",
+           "  if ok then s = tostring(r)",
+           "  elseif type(r) == 'string' then s = 'ERR ' .. r",
+           "  else s = 'ERR <' .. type(r) .. '>' end",
+           "  out[#out+1] = i .. ':' .. name .. ':' .. s",
+           "end",
            "local v = %d" % SEED_CONST]
-    for name, body in prog:
-        out.append("-- stage: %s" % name)
-        out.append("v = (function(x)")
+    for i, (name, body) in enumerate(prog):
+        out.append("-- stage %d: %s" % (i, name))
+        out.append("do")
+        out.append("  local ok, r = pcall(function(x)")
         out.append(body.rstrip("\n"))
-        out.append("end)(v)")
-    out.append("print(v)")
+        out.append("  end, v)")
+        out.append("  if ok and math.type(r) == 'integer' then v = r end")
+        out.append("  obs(%d, %r, ok, r)" % (i, name))
+        out.append("end")
+    out.append("print(table.concat(out, '\\n'))")
     return "\n".join(out) + "\n"
 
 

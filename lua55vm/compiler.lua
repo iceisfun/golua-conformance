@@ -31,6 +31,9 @@ FS.__index = FS
 local function new_funcstate(parent, source, chunkname)
   return setmetatable({
     parent = parent,
+    -- Lua 5.5 global declarations are shared across the whole chunk
+    gdecl = parent and parent.gdecl
+      or { allowall = true, allconst = false, declared = {}, const = {} },
     proto = {
       code = {}, lines = {}, consts = {}, protos = {},
       upvals = {}, locvars = {}, numparams = 0, is_vararg = false,
@@ -211,6 +214,24 @@ function FS:add_upval(name, in_stack, index)
   return #ups
 end
 
+-- under strict global declarations, an undeclared global access is an error
+function FS:check_global_read(name, line)
+  local g = self.gdecl
+  if not g.allowall and not g.declared[name] then
+    error(string.format("%s:%d: variable '%s' not declared",
+      self.proto.source, line or 0, name), 0)
+  end
+end
+
+function FS:check_global_write(name, line)
+  local g = self.gdecl
+  if g.allconst or g.const[name] then
+    error(string.format("%s:%d: attempt to assign to const variable '%s'",
+      self.proto.source, line or 0, name), 0)
+  end
+  self:check_global_read(name, line)
+end
+
 -- resolve a name: returns "local",reg | "upval",idx | "global"
 function FS:resolve(name)
   for i = #self.actvars, 1, -1 do
@@ -265,6 +286,7 @@ function exp2reg(fs, node, reg)
       fs:emit("GETUPVAL", reg, where, nil, node.line)
     else
       -- global: _ENV[name]
+      fs:check_global_read(node.name, node.line)
       local ek, ew = fs:resolve("_ENV")
       if ek == "local" then
         fs:emit("GETFIELD", reg, ew, fs:K(node.name), node.line)
@@ -575,6 +597,7 @@ local function store_to(fs, target, vreg)
     elseif kind == "upval" then
       fs:emit("SETUPVAL", vreg, where, nil, target.line)
     else
+      fs:check_global_write(target.name, target.line)
       local ek, ew = fs:resolve("_ENV")
       if ek == "local" then
         fs:emit("SETFIELD", ew, fs:K(target.name), vreg, target.line)
@@ -896,6 +919,18 @@ function compile_stmt(fs, node)
   elseif tag == "Break" then compile_break(fs, node)
   elseif tag == "Goto" then compile_goto(fs, node)
   elseif tag == "Label" then compile_label(fs, node)
+  elseif tag == "Global" then
+    local g = fs.gdecl
+    if node.star then
+      g.allowall = true
+      if node.attrib == "const" then g.allconst = true end
+    else
+      g.allowall = false
+      for i, nm in ipairs(node.names) do
+        g.declared[nm] = true
+        if node.attribs[i] == "const" then g.const[nm] = true end
+      end
+    end
   else error("compiler: unknown statement " .. tostring(tag)) end
 end
 
@@ -930,6 +965,13 @@ function Compiler.compile_function(parent_fs, node)
     local reg = fs.freereg
     fs:reserve(1)
     fs:new_local(p, reg, nil)
+  end
+  -- named vararg (...t): materialize the extra args as a table local
+  if node.vararg_name then
+    local reg = fs.freereg
+    fs:reserve(1)
+    fs:emit("VARARGPACK", reg, nil, nil, node.line)
+    fs:new_local(node.vararg_name, reg, nil)
   end
   for _, s in ipairs(node.body.stmts) do compile_stmt(fs, s) end
   -- implicit return

@@ -523,6 +523,13 @@ function Interp:exec_loop(frame)
         local want = b - 1
         for i = 1, want do R[a + i - 1] = va[i] end
       end
+    elseif op == "VARARGPACK" then
+      -- materialize varargs as a table {n = count, [1..] = ...}
+      local va = frame.varargs
+      local t = rt.new_table(va.n)
+      for i = 1, va.n do rt.rawset(t, i, va[i]) end
+      rt.rawset(t, "n", va.n)
+      R[a] = t
     elseif op == "CLOSURE" then
       local p = proto.protos[ins.b]
       local upvals = {}

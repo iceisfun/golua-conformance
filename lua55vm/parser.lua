@@ -148,6 +148,15 @@ function Parser:statement()
   if t.type == "op" and t.value == "::" then
     return self:label_stat()
   end
+  -- Lua 5.5 `global` is a contextual keyword: a declaration only when followed
+  -- by a name, `<attrib>`, or `*`; otherwise it is an ordinary identifier.
+  if t.type == "name" and t.value == "global" then
+    local la = self:lookahead()
+    if la and (la.type == "name"
+       or (la.type == "op" and (la.value == "<" or la.value == "*"))) then
+      return self:global_stat()
+    end
+  end
   if t.type == "keyword" then
     local k = t.value
     if k == "if" then return self:if_stat() end
@@ -170,6 +179,28 @@ function Parser:statement()
     end
   end
   return self:expr_stat()
+end
+
+-- global [<attrib>] ( '*' | name [<attrib>] {',' name [<attrib>]} )
+function Parser:global_stat()
+  local line = self:cur().line
+  self:advance()                       -- 'global'
+  local default_attr = nil
+  if self:is("<") then
+    self:advance(); default_attr = self:expect_name(); self:expect(">")
+  end
+  if self:is("*") then
+    self:advance()
+    return { tag = "Global", star = true, attrib = default_attr, line = line }
+  end
+  local names, attribs = {}, {}
+  repeat
+    names[#names + 1] = self:expect_name()
+    local at = default_attr
+    if self:accept("<") then at = self:expect_name(); self:expect(">") end
+    attribs[#names] = at
+  until not self:accept(",")
+  return { tag = "Global", names = names, attribs = attribs, star = false, line = line }
 end
 
 function Parser:label_stat()
@@ -291,11 +322,15 @@ function Parser:funcbody(line, is_method)
   self:expect("(")
   local params = {}
   local is_vararg = false
+  local vararg_name = nil
   if is_method then params[#params + 1] = "self" end
   if not self:is(")") then
     repeat
       if self:is("...") then
-        self:advance(); is_vararg = true; break
+        self:advance(); is_vararg = true
+        -- Lua 5.5 named vararg: ...name binds the extra args as a table
+        if self:check("name") then vararg_name = self:advance().value end
+        break
       end
       params[#params + 1] = self:expect_name()
     until not self:accept(",")
@@ -304,7 +339,7 @@ function Parser:funcbody(line, is_method)
   local body = self:block()
   self:expect_match("end", "function", line)
   return { tag = "Function", params = params, is_vararg = is_vararg,
-           body = body, line = line }
+           vararg_name = vararg_name, body = body, line = line }
 end
 
 function Parser:local_stat()

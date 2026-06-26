@@ -125,18 +125,27 @@ function FS:leave_block()
   if b.has_capture then
     self:emit("CLOSE", b.firstreg)
   end
-  -- gotos emitted in this block that don't resolve to an in-block label escape
-  -- to the enclosing block, so reduce their active-var level (movegotosout).
+  -- Resolve gotos against labels in THIS block (labels go out of scope now).
+  -- Unmatched gotos escape to the enclosing block with a reduced active-var
+  -- level (movegotosout); the scope check happens here, at resolution.
   if self.pending_gotos then
     local outer = b.firstlocal - 1
     for _, g in ipairs(self.pending_gotos) do
       if not g.done and (g.emitpc or 0) >= b.startpc then
-        local inblock = false
+        local target
         for _, l in ipairs(self.labels) do
-          if l.name == g.name and l.block == b then inblock = true; break end
+          if l.name == g.name and l.block == b then target = l; break end
         end
-        if inblock then
-          g.done = true   -- resolved within this block; stop escaping outward
+        if target then
+          if target.pc > (g.emitpc or g.pc) and not target.void
+             and target.nactvar > g.nactvar then
+            local culprit = target.varnames[g.nactvar + 1] or "?"
+            error(string.format(
+              "%s:%d: <goto %s> at line %d jumps into the scope of '%s'",
+              self.proto.source, g.line or 0, g.name, g.line or 0, culprit), 0)
+          end
+          self:setarg(g.pc, "a", target.pc)
+          g.done = true
         elseif g.nactvar > outer then
           g.nactvar = outer
         end
@@ -930,25 +939,13 @@ function Compiler.compile_function(parent_fs, node)
   return #protos
 end
 
+-- after all blocks have closed, any goto not resolved has no visible label
 function Compiler.resolve_gotos(fs)
   for _, g in ipairs(fs.pending_gotos) do
-    local target
-    for _, l in ipairs(fs.labels) do
-      if l.name == g.name then target = l; break end
-    end
-    if not target then
+    if not g.done then
       error(string.format("%s:%d: no visible label '%s' for <goto>",
         fs.proto.source, g.line or 0, g.name), 0)
     end
-    -- forward goto into the scope of a local declared after it is illegal
-    -- (unless the target is a void label at the end of its block)
-    if target.pc > (g.emitpc or g.pc) and not target.void
-       and target.nactvar > g.nactvar then
-      local culprit = target.varnames[g.nactvar + 1] or "?"
-      error(string.format("%s:%d: <goto %s> at line %d jumps into the scope of '%s'",
-        fs.proto.source, g.line or 0, g.name, g.line or 0, culprit), 0)
-    end
-    fs:setarg(g.pc, "a", target.pc)
   end
 end
 

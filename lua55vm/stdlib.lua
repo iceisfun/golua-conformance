@@ -72,7 +72,7 @@ end
 
 local function check_int(I, args, n, fname)
   local v = args[n]
-  local i = rt.toint(v)
+  local i = rt.toint_coerce(v)   -- coerces numeric strings (luaL_checkinteger)
   if i == nil then
     if rt.tonum(v) ~= nil then   -- a number (or numeric string) without int rep
       argerror(I, n, fname, "number has no integer representation")
@@ -308,7 +308,9 @@ local function install_base(I)
     local src = f:read("a"); f:close()
     -- skip a leading BOM
     if src:sub(1, 3) == "\239\187\191" then src = src:sub(4) end
-    local ok, fn = pcall(function() return I:load(src, "@" .. path, env) end)
+    local ok, fn = pcall(function()
+      return I:load(src, "@" .. path, env, env ~= nil)
+    end)
     if ok then return fn end
     local m = fn
     if type(m) == "table" and getmetatable(m) == I.GUEST_ERR_MT then m = m.value end
@@ -334,6 +336,7 @@ local function install_base(I)
     local chunk = args[1]
     local chunkname = args[2]
     local env = args[4]
+    local has_env = args.n >= 4
     local src
     if type(chunk) == "string" then
       src = chunk
@@ -353,7 +356,7 @@ local function install_base(I)
       argerror(I, 1, "load", "string or function expected")
     end
     local ok, fn = pcall(function()
-      return I:load(src, chunkname, env)
+      return I:load(src, chunkname, env, has_env)
     end)
     if ok then
       return R(fn)

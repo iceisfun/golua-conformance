@@ -328,9 +328,21 @@ function Interp:exec_loop(frame)
     elseif op == "SETUPVAL" then
       uv_set(cl.upvals[ins.b], R[a])
     elseif op == "GETTABUP" then
-      R[a] = self:index(uv_get(cl.upvals[ins.b]), K[ins.c])
+      local obj = uv_get(cl.upvals[ins.b])
+      if not rt.is_table(obj) and self:metamethod(obj, "__index") == nil then
+        local nm = proto.upvals[ins.b] and proto.upvals[ins.b].name
+        self:rt_error("attempt to index a " .. rt.typename(obj) .. " value"
+          .. (nm and (" (upvalue '" .. nm .. "')") or ""))
+      end
+      R[a] = self:index(obj, K[ins.c])
     elseif op == "SETTABUP" then
-      self:setindex(uv_get(cl.upvals[a]), K[ins.b], R[ins.c])
+      local obj = uv_get(cl.upvals[a])
+      if not rt.is_table(obj) and self:metamethod(obj, "__newindex") == nil then
+        local nm = proto.upvals[a] and proto.upvals[a].name
+        self:rt_error("attempt to index a " .. rt.typename(obj) .. " value"
+          .. (nm and (" (upvalue '" .. nm .. "')") or ""))
+      end
+      self:setindex(obj, K[ins.b], R[ins.c])
     elseif op == "GETFIELD" then
       local obj = R[ins.b]
       if not rt.is_table(obj) and self:metamethod(obj, "__index") == nil then
@@ -587,13 +599,18 @@ local parser = require("parser")
 local compiler = require("compiler")
 
 -- compile source -> main closure (with _ENV upvalue bound to env or globals)
-function Interp:load(source, chunkname, env)
+-- has_env distinguishes an explicitly-passed env (even nil) from no env (which
+-- defaults to the global table). Lua's load(s, n, mode, env) with env=nil makes
+-- _ENV nil; load(s) defaults _ENV to _G.
+function Interp:load(source, chunkname, env, has_env)
   chunkname = chunkname or "?"
   local short = rt.shortsrc(chunkname)
   local tokens = lexer.tokenize(source, short)
   local ast = parser.parse(tokens, short)
   local proto = compiler.compile_main(ast, short, chunkname)
-  local env_uv = { closed = true, val = env or self.globals }
+  local envval
+  if has_env then envval = env else envval = self.globals end
+  local env_uv = { closed = true, val = envval }
   return rt.new_closure(proto, { env_uv })
 end
 

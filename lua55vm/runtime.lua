@@ -297,22 +297,27 @@ local function tonum(v)
 end
 M.tonum = tonum
 
--- coerce a value to an integer (for bitwise / explicit int contexts)
--- returns int or nil,reason  ; reason "nonint" means has no integer rep
+-- convert a NUMBER to an integer (bitwise contexts: no string coercion, like
+-- Lua's luaV_tointegerns). Returns int or nil if not an integral number.
 local function toint(v)
-  local t = type(v)
-  if t == "number" then
+  if type(v) == "number" then
     if mtype(v) == "integer" then return v end
     return tointeger(v)   -- nil if no integer representation
-  elseif t == "string" then
-    local n = tonumber(v)
-    if n == nil then return nil end
-    if mtype(n) == "integer" then return n end
-    return tointeger(n)
   end
   return nil
 end
 M.toint = toint
+
+-- convert a value to an integer, coercing numeric strings (luaL_checkinteger /
+-- explicit integer contexts in the standard library).
+function M.toint_coerce(v)
+  if type(v) == "number" then return toint(v) end
+  if type(v) == "string" then
+    local n = tonumber(v)
+    if n ~= nil then return toint(n) end
+  end
+  return nil
+end
 
 function M.truthy(v)
   return v ~= nil and v ~= false
@@ -477,15 +482,19 @@ function M.install(Interp)
     if h ~= nil then
       return (self:call(h, { a, b, n = 2 }))[1]
     end
-    local bad
-    if tonum(a) == nil then bad = a else bad = b end
     if BITWISE[op] then
-      if tonum(a) ~= nil and tonum(b) ~= nil then
+      -- bitwise does not coerce strings: only two real numbers can reach the
+      -- "no integer representation" case; otherwise it's a type error
+      if type(a) == "number" and type(b) == "number" then
         self:rt_error("number has no integer representation")
       end
+      local bad
+      if type(a) ~= "number" then bad = a else bad = b end
       self:rt_error("attempt to perform bitwise operation on a "
         .. M.typename(bad) .. " value" .. self:hint_for(bad))
     else
+      local bad
+      if tonum(a) == nil then bad = a else bad = b end
       if type(a) == "string" or type(b) == "string" then
         self:rt_error(hostfmt("attempt to %s a '%s' with a '%s'",
           ARITH_OPNAME[op], M.typename(a), M.typename(b)))
@@ -512,7 +521,7 @@ function M.install(Interp)
     if ia ~= nil then return ~ia end
     local h = self:metamethod(a, "__bnot")
     if h ~= nil then return (self:call(h, { a, a, n = 2 }))[1] end
-    if tonum(a) ~= nil then self:rt_error("number has no integer representation") end
+    if type(a) == "number" then self:rt_error("number has no integer representation") end
     self:rt_error("attempt to perform bitwise operation on a " .. M.typename(a)
       .. " value" .. self:hint_for(a))
   end

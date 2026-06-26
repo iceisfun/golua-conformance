@@ -321,7 +321,8 @@ function exp2reg(fs, node, reg)
     fs.freereg = reg + 1
   elseif tag == "Function" then
     local pidx = Compiler.compile_function(fs, node)
-    fs:emit("CLOSURE", reg, pidx, nil, node.line)
+    -- Lua attributes the CLOSURE to the function's closing 'end' line
+    fs:emit("CLOSURE", reg, pidx, nil, node.endline or node.line)
   elseif tag == "Table" then
     compile_table(fs, node, reg)
   elseif tag == "BinOp" then
@@ -744,7 +745,7 @@ local function compile_localfunction(fs, node)
   fs:reserve(1)
   fs:new_local(node.name, reg, nil)   -- in scope for recursion
   local pidx = Compiler.compile_function(fs, node.func)
-  fs:emit("CLOSURE", reg, pidx, nil, node.line)
+  fs:emit("CLOSURE", reg, pidx, nil, node.func.endline or node.line)
   fs.freereg = reg + 1
 end
 
@@ -1054,10 +1055,13 @@ function Compiler.compile_main(ast, source, chunkname)
   -- main chunk's sole upvalue is _ENV
   root:add_upval("_ENV", false, 0)
 
+  root.proto.line = 0
+  root.proto.lastline = ast.endline or 0
   root:enter_block(false)
   for _, s in ipairs(ast.body.stmts) do compile_stmt(root, s) end
   root:leave_block()
-  root:emit("RETURN", 0, 1, nil, 0)
+  -- implicit final return is attributed to the chunk's last line (like Lua)
+  root:emit("RETURN", 0, 1, nil, ast.endline or 0)
   Compiler.resolve_gotos(root)
   return root.proto
 end

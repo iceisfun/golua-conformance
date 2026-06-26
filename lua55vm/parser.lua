@@ -604,9 +604,10 @@ function Parser:parse_chunk()
   if self:cur().type ~= "eof" then
     self:error("'<eof>' expected near " .. tokdesc(self:cur()))
   end
-  -- a chunk is a vararg function
+  -- a chunk is a vararg function; its last line is the last real token's line
+  local prev = self.toks[self.i - 1]
   return { tag = "Function", params = {}, is_vararg = true, body = body,
-           line = 0, is_main = true }
+           line = 0, endline = (prev and prev.line) or 0, is_main = true }
 end
 
 local M = {}

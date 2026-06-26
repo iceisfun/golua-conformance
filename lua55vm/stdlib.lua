@@ -1390,7 +1390,7 @@ local function install_debug(I)
     local idx = 1
     if rt.is_thread(args[1]) then idx = 2 end
     local f = args[idx]
-    local what = args[idx + 1] or "nSltu"
+    local what = args[idx + 1] or "flnSrtu"   -- Lua's default (all but L)
     for i = 1, #what do
       if not ("nSltufLr"):find(what:sub(i, i), 1, true) then
         argerror(I, idx + 1, "getinfo", "invalid option")
@@ -1455,6 +1455,8 @@ local function install_debug(I)
     else
       argerror(I, idx, "getinfo", "function or level expected")
     end
+    -- "n": closures/C funcs queried directly have no call-site name
+    if what:find("n", 1, true) and h["namewhat"] == nil then h["namewhat"] = "" end
     -- "f": the function itself
     if what:find("f", 1, true) and thefunc ~= nil then h["func"] = thefunc end
     -- "L": active lines (lines that have code)

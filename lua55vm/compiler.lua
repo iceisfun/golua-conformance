@@ -144,6 +144,10 @@ function FS:leave_block()
               "%s:%d: <goto %s> at line %d jumps into the scope of '%s'",
               self.proto.source, g.line or 0, g.name, g.line or 0, culprit), 0)
           end
+          -- close captured / to-be-closed locals that go out of scope on the jump
+          if g.closepc and target.nactvar < #g.regs then
+            self:setarg(g.closepc, "a", g.regs[target.nactvar + 1])
+          end
           self:setarg(g.pc, "a", target.pc)
           g.done = true
         elseif g.nactvar > outer then
@@ -837,29 +841,29 @@ local function compile_break(fs, node)
   lb.breaks[#lb.breaks + 1] = fs:emit("JMP", 0, nil, nil, node.line)
 end
 
--- goto/label: collected per function and patched at function end
+-- goto/label: a goto may exit blocks containing captured / to-be-closed locals,
+-- so emit a CLOSE (level patched once the target's scope level is known) before
+-- the jump.  Targets and the scope check are resolved at block close.
 local function compile_goto(fs, node)
-  -- A backward goto that leaves the scope of locals must close their upvalues
-  -- before jumping (those registers may be reused as temporaries at the label).
-  for i = #fs.labels, 1, -1 do
-    local l = fs.labels[i]
-    if l.name == node.label then
-      if l.nactvar < #fs.actvars then
-        fs:emit("CLOSE", fs.actvars[l.nactvar + 1].reg, nil, nil, node.line)
-      end
-      break
-    end
-  end
+  -- snapshot the registers of the in-scope locals so resolution can compute
+  -- the CLOSE level from the target's active-var count.
+  local regs = {}
+  for i = 1, #fs.actvars do regs[i] = fs.actvars[i].reg end
+  local closepc = fs:emit("CLOSE", 256, nil, nil, node.line)   -- 256 = no-op
   fs.pending_gotos[#fs.pending_gotos + 1] =
     { name = node.label, pc = fs:emit("JMP", 0, nil, nil, node.line),
-      line = node.line, nactvar = #fs.actvars, emitpc = fs:pc() }
+      line = node.line, nactvar = #fs.actvars, emitpc = fs:pc(),
+      regs = regs, closepc = closepc }
 end
 
 local function compile_label(fs, node)
-  -- duplicate-label detection within the same block
+  -- duplicate-label detection: a label conflicts with any visible label, i.e.
+  -- one in the current block or an enclosing (still-active) block.
   local cur_block = fs.blocks[#fs.blocks]
+  local active = {}
+  for _, b in ipairs(fs.blocks) do active[b] = true end
   for _, l in ipairs(fs.labels) do
-    if l.name == node.name and l.block == cur_block then
+    if l.name == node.name and active[l.block] then
       error(string.format("%s:%d: label '%s' already defined on line %d",
         fs.proto.source, node.line or 0, node.name, l.line or 0), 0)
     end

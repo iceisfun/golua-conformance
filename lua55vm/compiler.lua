@@ -867,7 +867,8 @@ local function compile_genfor(fs, node)
   local b = fs:enter_block(true)
   for i = 1, nvars do
     fs:reserve(1)
-    fs:new_local(node.names[i], base + 4 + (i - 1), "const")  -- 5.5: read-only
+    -- only the first (control) variable is read-only in Lua 5.5
+    fs:new_local(node.names[i], base + 4 + (i - 1), (i == 1) and "const" or nil)
   end
   local loopstart = fs:here()
   compile_block(fs, node.body)

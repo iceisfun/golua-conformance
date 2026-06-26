@@ -620,8 +620,12 @@ function Interp:exec_loop(frame)
     elseif op == "UNPACKVARARG" then
       -- `...` for a named vararg: table.unpack(t, 1, t.n), read dynamically
       local t = R[ins.b]
-      local n = rt.toint(rt.rawget(t, "n")) or 0
-      if n < 0 then n = 0 end
+      local n = rt.rawget(t, "n")
+      -- t.n must be a non-negative integer no larger than INT_MAX/2 (matching
+      -- getnumargs: l_castS2U(n) <= INT_MAX/2)
+      if mtype(n) ~= "integer" or n < 0 or n > 0x3FFFFFFF then
+        self:rt_error("vararg table has no proper 'n'")
+      end
       local b = ins.c
       if b == 0 then
         for i = 1, n do R[a + i - 1] = rt.rawget(t, i) end

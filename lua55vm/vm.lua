@@ -284,6 +284,18 @@ local function clamp_for_limit(limit, step)
   end
 end
 
+-- coerce a numeric-for control value. Lua 5.5 coerces numeric strings, and a
+-- string operand is taken as a float (so such loops iterate in float).
+function Interp:forprep_num(v, what)
+  if type(v) == "number" then return v end
+  if type(v) == "string" then
+    local n = tonumber(v)
+    if n ~= nil then return n + 0.0 end
+  end
+  self:rt_error("bad 'for' " .. what .. " (number expected, got "
+    .. rt.typename(v) .. ")")
+end
+
 function Interp:exec_loop(frame)
   ::restart::
   local R = frame.R
@@ -481,10 +493,11 @@ function Interp:exec_loop(frame)
       end
       R[a] = rt.new_closure(p, upvals)
     elseif op == "FORPREP" then
-      local init, limit, step = R[a], R[a + 1], R[a + 2]
-      if type(init) ~= "number" then self:rt_error("'for' initial value must be a number") end
-      if type(limit) ~= "number" then self:rt_error("'for' limit must be a number") end
-      if type(step) ~= "number" then self:rt_error("'for' step must be a number") end
+      -- Lua validates operands in the order: limit, step, initial value
+      local limit = self:forprep_num(R[a + 1], "limit")
+      local step = self:forprep_num(R[a + 2], "step")
+      local init = self:forprep_num(R[a], "initial value")
+      R[a], R[a + 1], R[a + 2] = init, limit, step
       if step == 0 then self:rt_error("'for' step is zero") end
       frame.loopstate = frame.loopstate or {}
       if mtype(init) == "integer" and mtype(step) == "integer" then

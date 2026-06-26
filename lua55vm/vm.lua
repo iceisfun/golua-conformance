@@ -306,15 +306,31 @@ end
 -- Calling
 -- ---------------------------------------------------------------------------
 
+-- can the current coroutine yield right now? Only if it is not the main thread
+-- and there is no non-yieldable C (native) frame between here and its resume.
+-- The top frame (the yield/isyieldable native call itself) is excluded.
+function Interp:is_yieldable_now()
+  if self.current_thread == nil then return false end
+  local frames = self.frames
+  for i = 1, #frames - 1 do
+    local f = frames[i]
+    if f.native and not f.yieldable then return false end
+  end
+  return true
+end
+
 -- call any callable; args = {n=, [1..]}; returns results = {n=, [1..]}
 function Interp:call(fn, args)
   self.errhint = nil    -- invalidate any pending operand hint
   local ccmt = 0        -- __call chain length (Lua bounds it at 15)
   while true do
     if type(fn) == "function" then
-      -- native: push a marker frame so error levels / tracebacks count it
+      -- native: push a marker frame so error levels / tracebacks count it.
+      -- A native frame is a yield barrier (you can't yield across a C call)
+      -- unless it's a yieldable C function (pcall/xpcall).
       local frames = self.frames
-      local nf = { native = true, fn = fn }
+      local nf = { native = true, fn = fn,
+                   yieldable = self.yieldable_natives and self.yieldable_natives[fn] }
       frames[#frames + 1] = nf
       if self.hook and self.hook.call then self:fire_hook("call") end
       local res = fn(self, args)
@@ -858,6 +874,11 @@ function Interp:protected(fn, args, handler)
   local ok, res = pcall(function() return self:call(fn, args) end)
   if ok then
     return true, res
+  end
+  -- a coroutine self-close sentinel must not be caught here: re-raise it so it
+  -- keeps unwinding the coroutine up to its resume (do_resume handles it).
+  if type(res) == "table" and getmetatable(res) == self.SELFCLOSE_MT then
+    error(res, 0)
   end
   local function errval(e)
     if type(e) == "table" and getmetatable(e) == self.GUEST_ERR_MT then return e.value end

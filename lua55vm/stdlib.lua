@@ -251,6 +251,11 @@ local function install_base(I)
     end
   end)
 
+  -- pcall/xpcall are yieldable C functions: a coroutine may yield through them
+  I.yieldable_natives = I.yieldable_natives or {}
+  I.yieldable_natives[G.hash["pcall"]] = true
+  I.yieldable_natives[G.hash["xpcall"]] = true
+
   def("select", function(I, args)
     local sel = args[1]
     if sel == "#" then return R(args.n - 1) end
@@ -1350,6 +1355,8 @@ local function install_coroutine(I)
   local function def(name, fn) lib.hash[name] = fn end
 
   I.main_thread = setmetatable({ main = true }, rt.THREAD_MT)
+  -- marker metatable for the self-close unwind sentinel (see coroutine.close)
+  I.SELFCLOSE_MT = I.SELFCLOSE_MT or {}
 
   local function new_thread(f)
     local th = setmetatable({ frames = {}, depth = 0 }, rt.THREAD_MT)
@@ -1368,12 +1375,34 @@ local function install_coroutine(I)
   end)
 
   local function do_resume(I, th, passargs)
-    -- swap the per-coroutine frame stack and "current thread" in
+    -- swap the per-coroutine frame stack, "current thread" and debug hook in
     local saved_frames, saved_depth = I.frames, I.depth
     local saved_cur = I.current_thread
+    local saved_hook, saved_hcount = I.hook, I.hookcount
     I.frames, I.depth = th.frames, th.depth
     I.current_thread = th
+    I.hook = th.hook                       -- the coroutine's own hook
+    I.hookcount = (th.hook and th.hook.count) or 0
     local rr = pack(coroutine.resume(th.co, unpack(passargs, 1, passargs.n)))
+    th.hook = I.hook                        -- it may have changed its own hook
+    I.hook, I.hookcount = saved_hook, saved_hcount
+    -- a self-close (coroutine.close from inside the running coroutine) raises a
+    -- sentinel after running its to-be-closed handlers: discard the dead frames
+    -- and report a clean close (or the close error).
+    if not rr[1] and type(rr[2]) == "table"
+       and getmetatable(rr[2]) == I.SELFCLOSE_MT then
+      I.frames = {}
+      th.frames, th.depth = {}, 0
+      I.frames, I.depth = saved_frames, saved_depth
+      I.current_thread = saved_cur
+      th.closing = nil
+      local err = rr[2].err
+      if type(err) == "table" and getmetatable(err) == I.GUEST_ERR_MT then
+        err = err.value
+      end
+      if err ~= nil then return R(false, err) end
+      return R(true)
+    end
     -- if the body errored, its frames are left intact (the host error unwound
     -- without running close handlers); close their to-be-closed variables now,
     -- innermost first, chaining a new error if a __close raises.
@@ -1424,6 +1453,12 @@ local function install_coroutine(I)
   end)
 
   def("yield", function(I, args)
+    if not I:is_yieldable_now() then
+      if I.current_thread == nil then
+        I:rt_error("attempt to yield from outside a coroutine")
+      end
+      I:rt_error("attempt to yield across a C-call boundary")
+    end
     return pack(coroutine.yield(unpack(args, 1, args.n)))
   end)
 
@@ -1445,7 +1480,7 @@ local function install_coroutine(I)
       if th.main then return R(false) end
       return R(coroutine.status(th.co) ~= "dead")
     end
-    return R(I.current_thread ~= nil)
+    return R(I:is_yieldable_now())
   end)
 
   def("running", function(I, args)
@@ -1473,7 +1508,20 @@ local function install_coroutine(I)
       status = coroutine.status(th.co)
     end
     if status == "running" then
-      I:rt_error(th.main and "cannot close main thread" or "cannot close a running coroutine")
+      if th.main then I:rt_error("cannot close main thread") end
+      -- self-close: a coroutine closing itself. Run all its pending to-be-closed
+      -- handlers in the current (possibly non-yieldable) context, then raise a
+      -- sentinel that unwinds the coroutine so its resume returns.
+      th.closing = true
+      local closeerr
+      for i = #I.frames, 1, -1 do
+        local fr = I.frames[i]
+        if fr and not fr.native and fr.tbc and #fr.tbc > 0 then
+          local ok, e = pcall(I.close_upvals, I, fr, 0, closeerr)
+          if ok then if e ~= nil then closeerr = e end else closeerr = e end
+        end
+      end
+      error(setmetatable({ selfclose = true, err = closeerr }, I.SELFCLOSE_MT), 0)
     elseif status == "normal" then
       I:rt_error("cannot close a normal coroutine")
     end
@@ -1780,33 +1828,42 @@ local function install_debug(I)
     return EMPTY
   end)
   def("sethook", function(I, args)
+    -- sethook([thread,] fn, mask [, count]) sets a PER-THREAD hook; with no
+    -- thread it targets the running one (current coroutine, else main)
     local idx = rt.is_thread(args[1]) and 2 or 1
+    local th = (idx == 2) and args[1] or (I.current_thread or I.main_thread)
     local fn = args[idx]
-    if fn == nil then
-      I.hook = nil
-      return EMPTY
+    local hook
+    if fn ~= nil then
+      local mask = args[idx + 1]
+      if type(mask) ~= "string" then mask = "" end
+      local count = opt_int(I, args, idx + 2, "sethook", 0)
+      hook = {
+        fn = fn,
+        call = mask:find("c", 1, true) ~= nil,
+        ret = mask:find("r", 1, true) ~= nil,
+        line = mask:find("l", 1, true) ~= nil,
+        count = (count > 0) and count or nil,
+        mask = mask,
+      }
     end
-    local mask = args[idx + 1]
-    if type(mask) ~= "string" then mask = "" end
-    local count = opt_int(I, args, idx + 2, "sethook", 0)
-    I.hook = {
-      fn = fn,
-      call = mask:find("c", 1, true) ~= nil,
-      ret = mask:find("r", 1, true) ~= nil,
-      line = mask:find("l", 1, true) ~= nil,
-      count = (count > 0) and count or nil,
-      mask = mask,
-    }
-    I.hookcount = I.hook.count or 0
+    th.hook = hook
+    -- if the target is the thread that is currently executing, apply it now
+    if th == (I.current_thread or I.main_thread) then
+      I.hook = hook
+      I.hookcount = (hook and hook.count) or 0
+    end
     return EMPTY
   end)
   def("gethook", function(I, args)
-    if I.hook == nil then return R(nil) end
+    local th = rt.is_thread(args[1]) and args[1] or (I.current_thread or I.main_thread)
+    local hook = (th == (I.current_thread or I.main_thread)) and I.hook or th.hook
+    if hook == nil then return R(nil) end
     local m = ""
-    if I.hook.call then m = m .. "c" end
-    if I.hook.ret then m = m .. "r" end
-    if I.hook.line then m = m .. "l" end
-    return R(I.hook.fn, m, I.hook.count or 0)
+    if hook.call then m = m .. "c" end
+    if hook.ret then m = m .. "r" end
+    if hook.line then m = m .. "l" end
+    return R(hook.fn, m, hook.count or 0)
   end)
   def("getregistry", function(I, args)
     I.registry = I.registry or rt.new_table()

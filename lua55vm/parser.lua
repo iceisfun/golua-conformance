@@ -125,6 +125,16 @@ function Parser:block()
     local s = self:statement()
     if s then stmts[#stmts + 1] = s end
   end
+  -- mark "void" labels: a label followed only by other labels (or block end).
+  -- A goto to a void label never jumps into the scope of the block's locals.
+  local trailing = true
+  for i = #stmts, 1, -1 do
+    if stmts[i].tag == "Label" then
+      if trailing then stmts[i].void = true end
+    else
+      trailing = false
+    end
+  end
   return { tag = "Block", stmts = stmts }
 end
 

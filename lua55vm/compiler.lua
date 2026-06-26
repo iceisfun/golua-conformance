@@ -110,6 +110,7 @@ function FS:enter_block(is_loop)
   local b = {
     firstlocal = #self.actvars + 1,
     firstreg = self.freereg,
+    startpc = self:here(),
     is_loop = is_loop,
     has_capture = false,
     breaks = {},
@@ -123,6 +124,24 @@ function FS:leave_block()
   -- emit CLOSE for captured / to-be-closed locals in this block
   if b.has_capture then
     self:emit("CLOSE", b.firstreg)
+  end
+  -- gotos emitted in this block that don't resolve to an in-block label escape
+  -- to the enclosing block, so reduce their active-var level (movegotosout).
+  if self.pending_gotos then
+    local outer = b.firstlocal - 1
+    for _, g in ipairs(self.pending_gotos) do
+      if not g.done and (g.emitpc or 0) >= b.startpc then
+        local inblock = false
+        for _, l in ipairs(self.labels) do
+          if l.name == g.name and l.block == b then inblock = true; break end
+        end
+        if inblock then
+          g.done = true   -- resolved within this block; stop escaping outward
+        elseif g.nactvar > outer then
+          g.nactvar = outer
+        end
+      end
+    end
   end
   -- pop locals declared in this block, closing their debug ranges
   local endpc = self:here()
@@ -824,7 +843,7 @@ local function compile_goto(fs, node)
   end
   fs.pending_gotos[#fs.pending_gotos + 1] =
     { name = node.label, pc = fs:emit("JMP", 0, nil, nil, node.line),
-      line = node.line, nactvar = #fs.actvars }
+      line = node.line, nactvar = #fs.actvars, emitpc = fs:pc() }
 end
 
 local function compile_label(fs, node)
@@ -836,9 +855,12 @@ local function compile_label(fs, node)
         fs.proto.source, node.line or 0, node.name, l.line or 0), 0)
     end
   end
+  -- snapshot the names of in-scope locals (to name the culprit in goto errors)
+  local varnames = {}
+  for i = 1, #fs.actvars do varnames[i] = fs.actvars[i].name end
   fs.labels[#fs.labels + 1] =
     { name = node.name, pc = fs:here(), nactvar = #fs.actvars,
-      line = node.line, block = cur_block }
+      line = node.line, block = cur_block, void = node.void, varnames = varnames }
 end
 
 function compile_stmt(fs, node)
@@ -915,11 +937,16 @@ function Compiler.resolve_gotos(fs)
       if l.name == g.name then target = l; break end
     end
     if not target then
-      if g.name == "break" then
-        -- legacy; not used
-      end
-      error(string.format("%s:%d: no visible label '%s' for goto",
+      error(string.format("%s:%d: no visible label '%s' for <goto>",
         fs.proto.source, g.line or 0, g.name), 0)
+    end
+    -- forward goto into the scope of a local declared after it is illegal
+    -- (unless the target is a void label at the end of its block)
+    if target.pc > (g.emitpc or g.pc) and not target.void
+       and target.nactvar > g.nactvar then
+      local culprit = target.varnames[g.nactvar + 1] or "?"
+      error(string.format("%s:%d: <goto %s> at line %d jumps into the scope of '%s'",
+        fs.proto.source, g.line or 0, g.name, g.line or 0, culprit), 0)
     end
     fs:setarg(g.pc, "a", target.pc)
   end

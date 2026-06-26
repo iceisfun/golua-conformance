@@ -31,6 +31,7 @@ divergence these tools find; this repo keeps the *finders*.
 | `datefuzz/` | `os.date` / `os.time` strftime + field-normalization differential. |
 | `utf8fuzz/` | `utf8.*` (char/codepoint/len/offset/codes) over valid + malformed byte sequences. |
 | `luadiff/`  | Generic single-file differential harness: run one `.lua` under golua and the reference, normalize prog-name/paths/pointers, diff stdout+stderr+exit. Resource-limited, concurrency-safe. |
+| `lua55vm/`  | **A self-hosted Lua 5.5 interpreter written in Lua** (lexer → parser → bytecode compiler → register VM + stdlib). Runs on a host Lua *and unchanged on golua*, so it exercises golua through a completely different execution path (`golua → lua55vm → guest program`, nestable). Differentially validated against golua via `lua55vm/scripts/difftest.sh`. See `lua55vm/README.md`. |
 | `docs/`     | Design notes (e.g. the packfuzz state-machine plan).                     |
 
 ## Prerequisites

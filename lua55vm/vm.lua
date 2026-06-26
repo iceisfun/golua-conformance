@@ -1,0 +1,613 @@
+-- lua55vm/vm.lua
+-- The guest bytecode interpreter.
+--
+-- The Interp object owns globals, runtime ops (mixed in from runtime.lua) and
+-- the execution loop.  Guest calls recurse on the host stack, which lets guest
+-- coroutines map directly onto host coroutines.
+
+local rt = require("runtime")
+
+local Interp = {}
+Interp.__index = Interp
+
+local mtype = math.type
+local floor = math.floor
+local tointeger = math.tointeger
+
+local function truthy(v) return v ~= nil and v ~= false end
+
+-- ---------------------------------------------------------------------------
+-- Construction
+-- ---------------------------------------------------------------------------
+
+function Interp.new()
+  local self = setmetatable({}, Interp)
+  self.globals = rt.new_table()
+  self.string_meta = nil
+  self.type_meta = {}                 -- typename -> GTable
+  self.GUEST_ERR_MT = { __name = "guesterror" }
+  self.object_ids = setmetatable({}, { __mode = "k" })
+  self.next_object_id = 0x10000
+  self.float_fmt = "%.14g"
+  self.frames = {}                    -- guest call stack (for errors/traceback)
+  self.depth = 0
+  self.max_depth = 10000              -- matches golua DefaultMaxCallDepth
+  return self
+end
+
+rt.install(Interp)
+
+-- ---------------------------------------------------------------------------
+-- Upvalues
+-- ---------------------------------------------------------------------------
+
+local function uv_get(uv)
+  if uv.closed then return uv.val else return uv.frame_R[uv.idx] end
+end
+local function uv_set(uv, v)
+  if uv.closed then uv.val = v else uv.frame_R[uv.idx] = v end
+end
+
+function Interp:find_upval(frame, reg)
+  local uv = frame.openuv[reg]
+  if uv == nil then
+    uv = { frame_R = frame.R, idx = reg, closed = false }
+    frame.openuv[reg] = uv
+  end
+  return uv
+end
+
+-- close open upvalues and run to-be-closed handlers for registers >= level
+function Interp:close_upvals(frame, level, errobj)
+  if frame.tbc and #frame.tbc > 0 then
+    for i = #frame.tbc, 1, -1 do
+      local reg = frame.tbc[i]
+      if reg >= level then
+        table.remove(frame.tbc, i)
+        local val = frame.R[reg]
+        if val ~= nil and val ~= false then
+          local h = self:metamethod(val, "__close")
+          if h then
+            self:call(h, { val, (errobj and errobj.value), n = 2 })
+          end
+        end
+      end
+    end
+  end
+  local openuv = frame.openuv
+  for reg, uv in pairs(openuv) do
+    if reg >= level then
+      uv.val = uv.frame_R[uv.idx]
+      uv.closed = true
+      uv.frame_R = nil
+      openuv[reg] = nil
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- where() for error positions
+-- ---------------------------------------------------------------------------
+
+local function frame_loc(frame)
+  if not frame or frame.native or not frame.proto then return "" end
+  local line = frame.proto.lines[frame.savedpc] or 0
+  return string.format("%s:%d: ", frame.proto.source, line)
+end
+
+-- location of the nearest guest frame from the top (runtime / argument errors)
+function Interp:where()
+  local frames = self.frames
+  for i = #frames, 1, -1 do
+    local f = frames[i]
+    if f.proto and not f.native then return frame_loc(f) end
+  end
+  return ""
+end
+
+-- location at an explicit level (for error()): the currently running built-in
+-- is at the top of the stack, so level 1 == its caller.
+function Interp:where_level(level)
+  return frame_loc(self.frames[#self.frames - level])
+end
+
+-- ---------------------------------------------------------------------------
+-- Variable info for error messages (Lua's getobjname / varinfo)
+-- ---------------------------------------------------------------------------
+
+-- find the name of an active local occupying `reg` at instruction `pc`
+local function local_name(proto, reg, pc)
+  local best
+  for _, lv in ipairs(proto.locvars) do
+    if lv.reg == reg and lv.startpc <= pc and (lv.endpc == nil or pc < lv.endpc) then
+      best = lv.name   -- last matching range wins
+    end
+  end
+  return best
+end
+
+-- describe what produced register `reg` at pc: returns kind, name (or nil)
+function Interp:reg_name(cl, pc, reg)
+  local proto = cl.proto
+  local nm = local_name(proto, reg, pc)
+  if nm then return "local", nm end
+  -- scan backwards for the instruction that last wrote `reg`
+  local code = proto.code
+  for i = pc - 1, 1, -1 do
+    local ins = code[i]
+    local op = ins.op
+    if op == "GETTABUP" and ins.a == reg then
+      local uname = proto.upvals[ins.b] and proto.upvals[ins.b].name
+      local key = proto.consts[ins.c]
+      if uname == "_ENV" and type(key) == "string" then return "global", key end
+      if type(key) == "string" then return "field", key end
+      return nil
+    elseif op == "GETFIELD" and ins.a == reg then
+      local key = proto.consts[ins.c]
+      if type(key) == "string" then return "field", key end
+      return nil
+    elseif op == "GETUPVAL" and ins.a == reg then
+      local u = proto.upvals[ins.b]
+      return "upvalue", u and u.name
+    elseif op == "SELF" and ins.a == reg then
+      local key = proto.consts[ins.c]
+      if type(key) == "string" then return "method", key end
+      return nil
+    elseif op == "LOADK" and ins.a == reg then
+      local k = proto.consts[ins.b]
+      if type(k) == "string" then return "constant", k end
+      return nil
+    elseif op == "MOVE" and ins.a == reg then
+      -- follow the move source (only if source is a local)
+      local snm = local_name(proto, ins.b, i)
+      if snm then return "local", snm end
+      return nil
+    elseif (op == "CALL" or op == "GETTABLE" or op == "NEWTABLE"
+            or op == "CLOSURE" or op == "VARARG") and ins.a == reg then
+      return nil
+    end
+  end
+  return nil
+end
+
+-- build the "(kind 'name')" suffix for an operand register
+function Interp:name_suffix(frame, reg)
+  if not frame or not frame.cl then return "" end
+  local kind, name = self:reg_name(frame.cl, frame.savedpc, reg)
+  if kind and name then
+    return string.format(" (%s '%s')", kind, name)
+  end
+  return ""
+end
+
+-- find the variable-name suffix for `value` among the registers recorded by
+-- the current op's error hint (used by arith/concat/len/unm error messages).
+function Interp:hint_for(value)
+  local h = self.errhint
+  if not h then return "" end
+  local f = h.frame
+  for i = 1, #h.regs do
+    local reg = h.regs[i]
+    if f.R[reg] == value then return self:name_suffix(f, reg) end
+  end
+  return ""
+end
+
+-- ---------------------------------------------------------------------------
+-- Calling
+-- ---------------------------------------------------------------------------
+
+-- call any callable; args = {n=, [1..]}; returns results = {n=, [1..]}
+function Interp:call(fn, args)
+  self.errhint = nil    -- invalidate any pending operand hint
+  if type(fn) == "function" then
+    -- native: push a marker frame so error levels / tracebacks count it
+    local frames = self.frames
+    local nf = { native = true, fn = fn }
+    frames[#frames + 1] = nf
+    local res = fn(self, args)
+    frames[#frames] = nil
+    if res == nil then return { n = 0 } end
+    return res
+  elseif rt.is_closure(fn) then
+    return self:run_closure(fn, args)
+  else
+    local h = self:metamethod(fn, "__call")
+    if h ~= nil then
+      local nargs = { n = args.n + 1, fn }
+      for i = 1, args.n do nargs[i + 1] = args[i] end
+      return self:call(h, nargs)
+    end
+    self:rt_error("attempt to call a " .. rt.typename(fn) .. " value")
+  end
+end
+
+local OP  -- forward declaration of dispatch handlers
+
+function Interp:run_closure(cl, args)
+  local proto = cl.proto
+  self.depth = self.depth + 1
+  if self.depth > self.max_depth then
+    self.depth = self.depth - 1
+    self:rt_error("stack overflow")
+  end
+  local R = {}
+  local np = proto.numparams
+  for i = 1, np do R[i - 1] = args[i] end
+  -- collect varargs
+  local varargs
+  if proto.is_vararg and args.n > np then
+    varargs = { n = args.n - np }
+    for i = np + 1, args.n do varargs[i - np] = args[i] end
+  else
+    varargs = { n = 0 }
+  end
+  -- initialize remaining registers to nil (host: leave absent)
+  local frame = {
+    cl = cl, proto = proto, R = R, varargs = varargs,
+    openuv = {}, tbc = {}, top = np, savedpc = 1,
+  }
+  self.frames[#self.frames + 1] = frame
+
+  -- exec_loop may raise (propagating to a guest pcall boundary, which restores
+  -- the frame stack and depth).  On normal return we pop here.
+  local result = self:exec_loop(frame)
+  self.frames[#self.frames] = nil
+  self.depth = self.depth - 1
+  return result
+end
+
+-- ---------------------------------------------------------------------------
+-- The execution loop
+-- ---------------------------------------------------------------------------
+
+local OPSYM = {
+  ADD="+", SUB="-", MUL="*", DIV="/", IDIV="//", MOD="%", POW="^",
+  BAND="&", BOR="|", BXOR="~", SHL="<<", SHR=">>",
+}
+
+-- clamp a (possibly float) limit for an integer for-loop.
+-- returns integer-ish limit and whether the loop should be skipped entirely.
+local maxint = math.maxinteger
+local minint = math.mininteger
+local function clamp_for_limit(limit, step)
+  if mtype(limit) == "integer" then return limit, false end
+  -- float limit
+  if step > 0 then
+    if limit >= maxint + 0.0 then return maxint, false end
+    if limit < minint + 0.0 then return minint, true end  -- below range: skip
+    return floor(limit), false
+  else
+    if limit <= minint + 0.0 then return minint, false end
+    if limit > maxint + 0.0 then return maxint, true end
+    return math.ceil(limit), false
+  end
+end
+
+function Interp:exec_loop(frame)
+  ::restart::
+  local R = frame.R
+  local proto = frame.proto
+  local code = proto.code
+  local K = proto.consts
+  local cl = frame.cl
+  local pc = 1
+
+  while true do
+    local ins = code[pc]
+    frame.savedpc = pc
+    pc = pc + 1
+    local op = ins.op
+    local a = ins.a
+
+    if op == "MOVE" then
+      R[a] = R[ins.b]
+    elseif op == "LOADK" then
+      R[a] = K[ins.b]
+    elseif op == "LOADNIL" then
+      for i = a, ins.b do R[i] = nil end
+    elseif op == "LOADBOOL" then
+      R[a] = (ins.b == 1)
+    elseif op == "GETUPVAL" then
+      R[a] = uv_get(cl.upvals[ins.b])
+    elseif op == "SETUPVAL" then
+      uv_set(cl.upvals[ins.b], R[a])
+    elseif op == "GETTABUP" then
+      R[a] = self:index(uv_get(cl.upvals[ins.b]), K[ins.c])
+    elseif op == "SETTABUP" then
+      self:setindex(uv_get(cl.upvals[a]), K[ins.b], R[ins.c])
+    elseif op == "GETFIELD" then
+      local obj = R[ins.b]
+      if not rt.is_table(obj) and self:metamethod(obj, "__index") == nil then
+        self:rt_error("attempt to index a " .. rt.typename(obj) .. " value"
+          .. self:name_suffix(frame, ins.b))
+      end
+      R[a] = self:index(obj, K[ins.c])
+    elseif op == "SETFIELD" then
+      local obj = R[a]
+      if not rt.is_table(obj) and self:metamethod(obj, "__newindex") == nil then
+        self:rt_error("attempt to index a " .. rt.typename(obj) .. " value"
+          .. self:name_suffix(frame, a))
+      end
+      self:setindex(obj, K[ins.b], R[ins.c])
+    elseif op == "GETTABLE" then
+      local obj = R[ins.b]
+      if not rt.is_table(obj) and self:metamethod(obj, "__index") == nil then
+        self:rt_error("attempt to index a " .. rt.typename(obj) .. " value"
+          .. self:name_suffix(frame, ins.b))
+      end
+      R[a] = self:index(obj, R[ins.c])
+    elseif op == "SETTABLE" then
+      local obj = R[a]
+      if not rt.is_table(obj) and self:metamethod(obj, "__newindex") == nil then
+        self:rt_error("attempt to index a " .. rt.typename(obj) .. " value"
+          .. self:name_suffix(frame, a))
+      end
+      self:setindex(obj, R[ins.b], R[ins.c])
+    elseif op == "SELF" then
+      local obj = R[ins.b]
+      R[a + 1] = obj
+      if not rt.is_table(obj) and self:metamethod(obj, "__index") == nil then
+        self:rt_error("attempt to index a " .. rt.typename(obj) .. " value"
+          .. self:name_suffix(frame, ins.b))
+      end
+      R[a] = self:index(obj, K[ins.c])
+    elseif op == "NEWTABLE" then
+      R[a] = rt.new_table()
+    elseif op == "SETLIST" then
+      local t = R[a]
+      local count = ins.b
+      if count == 0 then count = frame.top - a - 1 end
+      local start = ins.c
+      local h = t.hash
+      for i = 1, count do h[start + i] = R[a + i] end
+    elseif op == "ADD" or op == "SUB" or op == "MUL" or op == "DIV"
+        or op == "IDIV" or op == "MOD" or op == "POW"
+        or op == "BAND" or op == "BOR" or op == "BXOR"
+        or op == "SHL" or op == "SHR" then
+      self.errhint = { frame = frame, regs = { ins.b, ins.c } }
+      R[a] = self:arith(OPSYM[op], R[ins.b], R[ins.c])
+    elseif op == "UNM" then
+      self.errhint = { frame = frame, regs = { ins.b } }
+      R[a] = self:unm(R[ins.b])
+    elseif op == "NOT" then
+      R[a] = not truthy(R[ins.b])
+    elseif op == "LEN" then
+      self.errhint = { frame = frame, regs = { ins.b } }
+      R[a] = self:len(R[ins.b])
+    elseif op == "BNOT" then
+      self.errhint = { frame = frame, regs = { ins.b } }
+      R[a] = self:bnot(R[ins.b])
+    elseif op == "CONCAT" then
+      local b, c = ins.b, ins.c
+      self.errhint = { frame = frame, regs = {} }
+      for r = b, c do self.errhint.regs[#self.errhint.regs + 1] = r end
+      local acc = R[c]
+      for i = c - 1, b, -1 do
+        acc = self:concat(R[i], acc)
+      end
+      R[a] = acc
+    elseif op == "EQ" then
+      R[a] = self:eq(R[ins.b], R[ins.c])
+    elseif op == "LT" then
+      R[a] = self:lt(R[ins.b], R[ins.c])
+    elseif op == "LE" then
+      R[a] = self:le(R[ins.b], R[ins.c])
+    elseif op == "JMP" then
+      pc = a
+    elseif op == "JMPIF" then
+      if truthy(R[a]) then pc = ins.b end
+    elseif op == "JMPIFNOT" then
+      if not truthy(R[a]) then pc = ins.b end
+    elseif op == "CALL" then
+      local fn = R[a]
+      if not rt.is_callable(fn) and self:metamethod(fn, "__call") == nil then
+        self:rt_error("attempt to call a " .. rt.typename(fn) .. " value"
+          .. self:name_suffix(frame, a))
+      end
+      local b = ins.b
+      local nargs = (b == 0) and (frame.top - a - 1) or (b - 1)
+      local cargs = { n = nargs }
+      for i = 1, nargs do cargs[i] = R[a + i] end
+      local res = self:call(fn, cargs)
+      local nres = res.n
+      local c = ins.c
+      if c == 0 then
+        for i = 1, nres do R[a + i - 1] = res[i] end
+        frame.top = a + nres
+      else
+        local want = c - 1
+        for i = 1, want do R[a + i - 1] = res[i] end
+      end
+    elseif op == "TAILCALL" then
+      local fn = R[a]
+      if not rt.is_callable(fn) and self:metamethod(fn, "__call") == nil then
+        self:rt_error("attempt to call a " .. rt.typename(fn) .. " value"
+          .. self:name_suffix(frame, a))
+      end
+      local b = ins.b
+      local nargs = (b == 0) and (frame.top - a - 1) or (b - 1)
+      local cargs = { n = nargs }
+      for i = 1, nargs do cargs[i] = R[a + i] end
+      self:close_upvals(frame, 0)
+      if rt.is_closure(fn) then
+        -- reuse this frame: true tail call (no stack growth)
+        local p = fn.proto
+        local NR = {}
+        local np = p.numparams
+        for i = 1, np do NR[i - 1] = cargs[i] end
+        local va
+        if p.is_vararg and nargs > np then
+          va = { n = nargs - np }
+          for i = np + 1, nargs do va[i - np] = cargs[i] end
+        else
+          va = { n = 0 }
+        end
+        frame.cl = fn; frame.proto = p; frame.R = NR
+        frame.varargs = va; frame.openuv = {}; frame.tbc = {}
+        frame.top = np; frame.savedpc = 1; frame.loopstate = nil
+        goto restart
+      else
+        -- native or __call: just call and return its results
+        return self:call(fn, cargs)
+      end
+    elseif op == "RETURN" then
+      local b = ins.b
+      local nret = (b == 0) and (frame.top - a) or (b - 1)
+      local res = { n = nret }
+      for i = 1, nret do res[i] = R[a + i - 1] end
+      self:close_upvals(frame, 0)
+      return res
+    elseif op == "VARARG" then
+      local va = frame.varargs
+      local b = ins.b
+      if b == 0 then
+        local n = va.n
+        for i = 1, n do R[a + i - 1] = va[i] end
+        frame.top = a + n
+      else
+        local want = b - 1
+        for i = 1, want do R[a + i - 1] = va[i] end
+      end
+    elseif op == "CLOSURE" then
+      local p = proto.protos[ins.b]
+      local upvals = {}
+      for i, ud in ipairs(p.upvals) do
+        if ud.in_stack then
+          upvals[i] = self:find_upval(frame, ud.index)
+        else
+          upvals[i] = cl.upvals[ud.index]
+        end
+      end
+      R[a] = rt.new_closure(p, upvals)
+    elseif op == "FORPREP" then
+      local init, limit, step = R[a], R[a + 1], R[a + 2]
+      if type(init) ~= "number" then self:rt_error("'for' initial value must be a number") end
+      if type(limit) ~= "number" then self:rt_error("'for' limit must be a number") end
+      if type(step) ~= "number" then self:rt_error("'for' step must be a number") end
+      if step == 0 then self:rt_error("'for' step is zero") end
+      frame.loopstate = frame.loopstate or {}
+      if mtype(init) == "integer" and mtype(step) == "integer" then
+        local ilimit, skip = clamp_for_limit(limit, step)
+        local run
+        if step > 0 then run = (init <= ilimit) else run = (init >= ilimit) end
+        if skip or not run then
+          pc = ins.b
+        else
+          local count
+          if step > 0 then
+            count = (ilimit - init) // step
+          else
+            count = (init - ilimit) // (-step)
+          end
+          frame.loopstate[a] = { int = true, count = count, step = step }
+          R[a] = init
+          R[a + 3] = init
+        end
+      else
+        local fi, fl, fst = init + 0.0, limit + 0.0, step + 0.0
+        R[a], R[a + 1], R[a + 2] = fi, fl, fst
+        local run
+        if fst > 0 then run = (fi <= fl) else run = (fi >= fl) end
+        if not run then
+          pc = ins.b
+        else
+          frame.loopstate[a] = { int = false }
+          R[a + 3] = fi
+        end
+      end
+    elseif op == "FORLOOP" then
+      local st = frame.loopstate[a]
+      if st.int then
+        if st.count > 0 then
+          st.count = st.count - 1
+          local v = R[a] + st.step
+          R[a] = v
+          R[a + 3] = v
+          pc = ins.b
+        end
+      else
+        local step = R[a + 2]
+        local v = R[a] + step
+        local limit = R[a + 1]
+        local cont
+        if step > 0 then cont = (v <= limit) else cont = (v >= limit) end
+        if cont then
+          R[a] = v
+          R[a + 3] = v
+          pc = ins.b
+        end
+      end
+    elseif op == "TFORCALL" then
+      local fn = R[a]
+      local cargs = { n = 2, R[a + 1], R[a + 2] }
+      local res = self:call(fn, cargs)
+      local nvars = ins.c
+      for i = 1, nvars do R[a + 3 + i - 1] = res[i] end
+    elseif op == "TFORLOOP" then
+      if R[a + 3] ~= nil then
+        R[a + 2] = R[a + 3]
+        pc = ins.b
+      end
+    elseif op == "CLOSE" then
+      self:close_upvals(frame, a)
+    elseif op == "TBC" then
+      local v = R[a]
+      if v ~= nil and v ~= false and self:metamethod(v, "__close") == nil then
+        local nm = local_name(proto, a, frame.savedpc) or "?"
+        self:rt_error("variable '" .. nm .. "' got a non-closable value")
+      end
+      frame.tbc[#frame.tbc + 1] = a
+    else
+      error("vm: unknown opcode " .. tostring(op))
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Loading / running source
+-- ---------------------------------------------------------------------------
+
+local lexer = require("lexer")
+local parser = require("parser")
+local compiler = require("compiler")
+
+-- compile source -> main closure (with _ENV upvalue bound to env or globals)
+function Interp:load(source, chunkname, env)
+  chunkname = chunkname or "?"
+  local short = rt.shortsrc(chunkname)
+  local tokens = lexer.tokenize(source, short)
+  local ast = parser.parse(tokens, short)
+  local proto = compiler.compile_main(ast, short, chunkname)
+  local env_uv = { closed = true, val = env or self.globals }
+  return rt.new_closure(proto, { env_uv })
+end
+
+-- protected call: restores frame stack/depth on error so the VM stays
+-- consistent after a caught guest error.  Returns ok, results|errvalue.
+function Interp:protected(fn, args)
+  local saved_n = #self.frames
+  local saved_depth = self.depth
+  local ok, res = pcall(function() return self:call(fn, args) end)
+  if ok then
+    return true, res
+  end
+  -- unwind frame stack back to the protected point, running pending
+  -- to-be-closed handlers (inner frames first); a __close error replaces res.
+  for i = #self.frames, saved_n + 1, -1 do
+    local f = self.frames[i]
+    if f.tbc and #f.tbc > 0 then
+      local cok, cerr = pcall(self.close_upvals, self, f, 0, res)
+      if not cok then res = cerr end
+    end
+    self.frames[i] = nil
+  end
+  self.depth = saved_depth
+  if type(res) == "table" and getmetatable(res) == self.GUEST_ERR_MT then
+    return false, res.value
+  end
+  -- internal/host error: surface as a guest string error
+  return false, "[internal] " .. tostring(res)
+end
+
+return { Interp = Interp, rt = rt }

@@ -1,0 +1,8 @@
+print(3 == 3.0, 3 < 3.5, math.type(3 + 0.0))
+print(1 + 2, 1.0 + 2, 1 / 1, 5 // 2, 5.0 // 2)
+print(2^53, 2^53 + 1)
+print("10" + 5, "3.14" * 2, 10 .. 20)
+print(0xff, 0x10, 1e3, 0x1p4, 0xA.8p0)
+print(1 << 4, 255 & 0x0f, 0xf0 | 0x0f, 5 ~ 3, ~0)
+print(math.maxinteger + 1 == math.mininteger)
+print(tostring(1//0 == 1//0))

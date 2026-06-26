@@ -224,12 +224,10 @@ function FS:check_global_read(name, line)
 end
 
 function FS:check_global_write(name, line)
-  local g = self.gdecl
-  if g.allconst or g.const[name] then
+  if self.gdecl.const[name] then
     error(string.format("%s:%d: attempt to assign to const variable '%s'",
       self.proto.source, line or 0, name), 0)
   end
-  self:check_global_read(name, line)
 end
 
 -- resolve a name: returns "local",reg | "upval",idx | "global"
@@ -923,12 +921,22 @@ function compile_stmt(fs, node)
     local g = fs.gdecl
     if node.star then
       g.allowall = true
-      if node.attrib == "const" then g.allconst = true end
     else
-      g.allowall = false
+      -- track declared globals (permissive on undeclared use — enforcing
+      -- "variable not declared" requires block-scoped decls; we only enforce
+      -- <const> on explicitly named globals, which is unambiguous).
       for i, nm in ipairs(node.names) do
         g.declared[nm] = true
         if node.attribs[i] == "const" then g.const[nm] = true end
+      end
+      -- `global names = exprs` (or `global function f ...`) also assigns
+      if node.exprs then
+        local targets = {}
+        for _, nm in ipairs(node.names) do
+          targets[#targets + 1] = { tag = "Name", name = nm, line = node.line }
+        end
+        compile_assign(fs, { tag = "Assign", targets = targets,
+          exprs = node.exprs, line = node.line })
       end
     end
   else error("compiler: unknown statement " .. tostring(tag)) end

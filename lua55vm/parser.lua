@@ -153,6 +153,7 @@ function Parser:statement()
   if t.type == "name" and t.value == "global" then
     local la = self:lookahead()
     if la and (la.type == "name"
+       or (la.type == "keyword" and la.value == "function")
        or (la.type == "op" and (la.value == "<" or la.value == "*"))) then
       return self:global_stat()
     end
@@ -181,13 +182,22 @@ function Parser:statement()
   return self:expr_stat()
 end
 
--- global [<attrib>] ( '*' | name [<attrib>] {',' name [<attrib>]} )
+-- global [<attrib>] ( '*'
+--                    | 'function' name funcbody
+--                    | name [<attrib>] {',' name [<attrib>]} ['=' exprlist] )
 function Parser:global_stat()
   local line = self:cur().line
   self:advance()                       -- 'global'
   local default_attr = nil
   if self:is("<") then
     self:advance(); default_attr = self:expect_name(); self:expect(">")
+  end
+  -- global function name funcbody  ==  declare name + name = function...
+  if self:accept("function") then
+    local name = self:expect_name()
+    local func = self:funcbody(line, false)
+    return { tag = "Global", names = { name }, attribs = { default_attr },
+             star = false, exprs = { func }, line = line }
   end
   if self:is("*") then
     self:advance()
@@ -200,7 +210,10 @@ function Parser:global_stat()
     if self:accept("<") then at = self:expect_name(); self:expect(">") end
     attribs[#names] = at
   until not self:accept(",")
-  return { tag = "Global", names = names, attribs = attribs, star = false, line = line }
+  local exprs = nil
+  if self:accept("=") then exprs = self:exprlist() end
+  return { tag = "Global", names = names, attribs = attribs, star = false,
+           exprs = exprs, line = line }
 end
 
 function Parser:label_stat()
@@ -350,11 +363,21 @@ function Parser:local_stat()
     local func = self:funcbody(line, false)
     return { tag = "LocalFunction", name = name, func = func, line = line }
   end
+  -- Lua 5.5: an optional leading <attrib> applies to every name in the list
+  local default_attr = nil
+  if self:is("<") then
+    self:advance()
+    default_attr = self:expect_name()
+    if default_attr ~= "const" and default_attr ~= "close" then
+      self:error("unknown attribute '" .. default_attr .. "'")
+    end
+    self:expect(">")
+  end
   local names = {}
   local attribs = {}
   repeat
     names[#names + 1] = self:expect_name()
-    local attr = nil
+    local attr = default_attr
     if self:accept("<") then
       attr = self:expect_name()
       if attr ~= "const" and attr ~= "close" then

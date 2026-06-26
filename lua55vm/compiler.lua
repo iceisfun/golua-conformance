@@ -243,11 +243,20 @@ function FS:check_global_write(name, line)
   end
 end
 
+-- a `global` declaration is block-scoped for goto purposes (you cannot jump
+-- into its scope), like a local -- but it holds no register and is invisible to
+-- name resolution. Record a scope marker (name "*" for `global *`).
+function FS:add_gdecl_scope(name)
+  self.actvars[#self.actvars + 1] =
+    { name = name, reg = self.freereg, is_gdecl = true, captured = false }
+end
+
 -- resolve a name: returns "local",reg | "upval",idx | "global"
 function FS:resolve(name)
   for i = #self.actvars, 1, -1 do
-    if self.actvars[i].name == name then
-      return "local", self.actvars[i].reg, self.actvars[i]
+    local av = self.actvars[i]
+    if not av.is_gdecl and av.name == name then
+      return "local", av.reg, av
     end
   end
   if self.upvalmap[name] then
@@ -633,8 +642,9 @@ local function check_const(fs, target)
   local f = fs
   while f do
     for i = #f.actvars, 1, -1 do
-      if f.actvars[i].name == target.name then
-        local at = f.actvars[i].attrib
+      local av = f.actvars[i]
+      if not av.is_gdecl and av.name == target.name then
+        local at = av.attrib
         if at == "const" or at == "close" then
           error(string.format("%s:%d: attempt to assign to const variable '%s'",
             fs.proto.source, target.line or 0, target.name), 0)
@@ -993,6 +1003,13 @@ function compile_stmt(fs, node)
       for i, nm in ipairs(node.names) do
         if node.attribs[i] == "const" then g.const[nm] = true end
       end
+    end
+    -- record a goto scope barrier for the declaration (so a goto cannot jump
+    -- into the scope of a `global *` / `global name`)
+    if node.star then
+      fs:add_gdecl_scope("*")
+    else
+      for _, nm in ipairs(node.names) do fs:add_gdecl_scope(nm) end
     end
   else error("compiler: unknown statement " .. tostring(tag)) end
 end

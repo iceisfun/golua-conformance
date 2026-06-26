@@ -111,7 +111,9 @@ local BLOCK_END = {
   ["end"] = true, ["else"] = true, ["elseif"] = true, ["until"] = true,
 }
 
-function Parser:block()
+-- `keep_trailing_scope` (repeat-until) means the block's scope continues past
+-- its end (into the `until` condition), so trailing labels are NOT void.
+function Parser:block(keep_trailing_scope)
   local stmts = {}
   while true do
     local t = self:cur()
@@ -127,12 +129,15 @@ function Parser:block()
   end
   -- mark "void" labels: a label followed only by other labels (or block end).
   -- A goto to a void label never jumps into the scope of the block's locals.
-  local trailing = true
-  for i = #stmts, 1, -1 do
-    if stmts[i].tag == "Label" then
-      if trailing then stmts[i].void = true end
-    else
-      trailing = false
+  -- (Not for a repeat body: its `until` condition keeps the scope alive.)
+  if not keep_trailing_scope then
+    local trailing = true
+    for i = #stmts, 1, -1 do
+      if stmts[i].tag == "Label" then
+        if trailing then stmts[i].void = true end
+      else
+        trailing = false
+      end
     end
   end
   return { tag = "Block", stmts = stmts }
@@ -273,7 +278,7 @@ end
 function Parser:repeat_stat()
   local line = self:cur().line
   self:advance()
-  local body = self:block()
+  local body = self:block(true)   -- until-condition keeps the body's scope
   self:expect_match("until", "repeat", line)
   local cond = self:expr()
   return { tag = "Repeat", body = body, cond = cond, line = line }

@@ -1142,8 +1142,9 @@ local function install_coroutine(I)
 
   def("close", function(I, args)
     local th = args[1]
+    if args.n == 0 then th = I.current_thread or I.main_thread end
     if not rt.is_thread(th) then typeerror(I, 1, "close", "thread", args) end
-    if th.main then I:rt_error("cannot close a main thread") end
+    if th.main then I:rt_error("cannot close main thread") end
     if th == I.current_thread then I:rt_error("cannot close a running coroutine") end
     -- run the coroutine's pending to-be-closed handlers (inner frames first),
     -- in the coroutine's own context, then dispose of the host coroutine.

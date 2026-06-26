@@ -1234,6 +1234,26 @@ local function install_coroutine(I)
     I.frames, I.depth = th.frames, th.depth
     I.current_thread = th
     local rr = pack(coroutine.resume(th.co, unpack(passargs, 1, passargs.n)))
+    -- if the body errored, its frames are left intact (the host error unwound
+    -- without running close handlers); close their to-be-closed variables now,
+    -- innermost first, chaining a new error if a __close raises.
+    if not rr[1] then
+      local errobj = rr[2]
+      while #I.frames > 0 do
+        local top = #I.frames
+        local f = I.frames[top]
+        I.frames[top] = nil
+        if f and not f.native and f.tbc and #f.tbc > 0 then
+          local cok, cerr = pcall(I.close_upvals, I, f, 0, errobj)
+          if cok then
+            if cerr ~= nil then errobj = cerr end
+          else
+            errobj = cerr
+          end
+        end
+      end
+      rr[2] = errobj
+    end
     th.frames, th.depth = I.frames, I.depth
     I.frames, I.depth = saved_frames, saved_depth
     I.current_thread = saved_cur
@@ -1423,16 +1443,12 @@ local function install_debug(I)
         h["isvararg"] = p.is_vararg
       end
       -- name info ("n"): how this function was called, seen from its caller
+      -- (consults frame.callinfo for metamethod/hook frames, then the
+      -- caller's call instruction) -- same as getfuncname/frame_name
       if what:find("n", 1, true) then
         h["namewhat"] = ""
-        local caller = I.frames[#I.frames - level - 1]
-        if caller and caller.cl and not caller.native and caller.proto then
-          local ci = caller.proto.code[caller.savedpc]
-          if ci and (ci.op == "CALL" or ci.op == "TAILCALL") then
-            local kind, nm = I:reg_name(caller.cl, caller.savedpc, ci.a)
-            if kind and nm then h["name"] = nm; h["namewhat"] = kind end
-          end
-        end
+        local kind, nm = I:frame_name(#I.frames - level)
+        if kind and nm then h["name"] = nm; h["namewhat"] = kind end
       end
     elseif rt.is_closure(f) then
       local p = f.proto

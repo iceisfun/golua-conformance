@@ -855,31 +855,42 @@ local function compile_numfor(fs, node)
 end
 
 local function compile_genfor(fs, node)
+  -- Lua 5.5 layout (after the TFORPREP swap):
+  --   base   = iterator function   "(for state)"
+  --   base+1 = state               "(for state)"
+  --   base+2 = closing var         "(for state)"  (to-be-closed)
+  --   base+3 = control var = first loop variable (read-only)
+  --   base+4..= remaining loop variables
+  -- The explist yields func, state, control(init), closing into base..base+3;
+  -- TFORPREP swaps base+2<->base+3 so the to-be-closed sits below the loop
+  -- variables (so a goto/break out of the loop closes it via a single CLOSE).
   local base = fs.freereg
-  -- base=f, base+1=state, base+2=control, base+3=closing (to-be-closed),
-  -- loop vars at base+4..
+  local nvars = #node.names
   adjust_explist(fs, node.exprs, base, 4)
   fs:reserve(4)
-  fs.freereg = base + 4
-  fs:emit("TBC", base + 3, nil, nil, node.line)   -- 4th value is to-be-closed
+  if nvars > 1 then fs:reserve(nvars - 1) end
+  fs.freereg = base + 3 + nvars
+  local prep = fs:emit("TFORPREP", base, 0, nil, node.line)
   fs.ntbc = fs.ntbc + 1
-  local nvars = #node.names
-  local jprep = fs:emit("JMP", 0)        -- jump to TFORCALL
   local b = fs:enter_block(true)
+  b.firstreg = base
+  -- hidden internal locals so goto/break CLOSE levels include the tbc at base+2
+  fs:new_local("(for state)", base, nil)
+  fs:new_local("(for state)", base + 1, nil)
+  fs:new_local("(for state)", base + 2, nil)
   for i = 1, nvars do
-    fs:reserve(1)
     -- only the first (control) variable is read-only in Lua 5.5
-    fs:new_local(node.names[i], base + 4 + (i - 1), (i == 1) and "const" or nil)
+    fs:new_local(node.names[i], base + 3 + (i - 1), (i == 1) and "const" or nil)
   end
   local loopstart = fs:here()
   compile_block(fs, node.body)
   fs:leave_block()
-  fs:setarg(jprep, "a", fs:here())
+  fs:setarg(prep, "b", fs:here())        -- TFORPREP jumps to TFORCALL
   fs:emit("TFORCALL", base, nil, nvars, node.line)
   fs:emit("TFORLOOP", base, loopstart, nil, node.line)
-  -- loop exit (normal fall-through and breaks): close the 4th value
+  -- loop exit (normal fall-through and breaks): close the to-be-closed var
   local exitpc = fs:here()
-  fs:emit("CLOSE", base + 3, nil, nil, node.line)
+  fs:emit("CLOSE", base + 2, nil, nil, node.line)
   for _, pc in ipairs(b.breaks) do fs:setarg(pc, "a", exitpc) end
   fs.ntbc = fs.ntbc - 1
   fs.freereg = base

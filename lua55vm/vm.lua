@@ -310,7 +310,11 @@ function Interp:call(fn, args)
     local frames = self.frames
     local nf = { native = true, fn = fn }
     frames[#frames + 1] = nf
+    if self.hook and self.hook.call then self:fire_hook("call") end
     local res = fn(self, args)
+    -- return hooks fire for C functions too (e.g. the 'return sethook' event
+    -- right after a return hook is installed inside a C call)
+    if self.hook and self.hook.ret then self:fire_hook("return") end
     frames[#frames] = nil
     if res == nil then return { n = 0 } end
     return res
@@ -725,15 +729,26 @@ function Interp:exec_loop(frame)
           pc = ins.b
         end
       end
+    elseif op == "TFORPREP" then
+      -- swap control (a+2) and closing (a+3); mark closing (now a+2) tbc
+      local tmp = R[a + 3]; R[a + 3] = R[a + 2]; R[a + 2] = tmp
+      local v = R[a + 2]
+      if v ~= nil and v ~= false then
+        if self:metamethod(v, "__close") == nil then
+          local nm = local_name(proto, a + 2, frame.savedpc) or "?"
+          self:rt_error("variable '" .. nm .. "' got a non-closable value")
+        end
+        frame.tbc[#frame.tbc + 1] = a + 2
+      end
+      pc = ins.b                                   -- jump to TFORCALL
     elseif op == "TFORCALL" then
       local fn = R[a]
-      local cargs = { n = 2, R[a + 1], R[a + 2] }
+      local cargs = { n = 2, R[a + 1], R[a + 3] }  -- state, control
       local res = self:call(fn, cargs)
       local nvars = ins.c
-      for i = 1, nvars do R[a + 4 + i - 1] = res[i] end   -- vars at a+4 (a+3 = closing)
+      for i = 1, nvars do R[a + 3 + i - 1] = res[i] end   -- loop vars at a+3
     elseif op == "TFORLOOP" then
-      if R[a + 4] ~= nil then
-        R[a + 2] = R[a + 4]
+      if R[a + 3] ~= nil then                      -- control / first var
         pc = ins.b
       end
     elseif op == "CLOSE" then

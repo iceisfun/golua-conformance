@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# difftest.sh : run a Lua program through the guest interpreter and the golua
-# oracle, then compare stdout and the error message (tracebacks ignored).
+# difftest.sh : run a Lua program through the guest interpreter and the
+# reference oracle, then compare stdout and the error message (tracebacks
+# ignored).
 #
 #   difftest.sh FILE.lua            # diff one file (verbose)
 #   difftest.sh -q FILE.lua         # quiet: only PASS/FAIL line
 #
-# Env: GOLUA (default /tmp/golua), HOSTLUA (default lua)
+# Env:
+#   ORACLE   reference interpreter (default /usr/bin/lua5.5.0; falls back to
+#            $GOLUA then /tmp/golua for back-compat)
+#   HOSTLUA  host Lua used to run the guest interpreter (default lua)
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VMDIR="$(dirname "$HERE")"
-GOLUA="${GOLUA:-/tmp/golua}"
+GOLUA="${ORACLE:-${GOLUA:-/usr/bin/lua5.5.0}}"
 HOSTLUA="${HOSTLUA:-lua}"
 
 QUIET=0
@@ -27,7 +31,7 @@ norm() {
 # strip the leading "prog: " prefix, drop traceback noise.
 errmsg() {
   grep -v -E '^(stack traceback:|[[:space:]])' \
-    | sed -E 's/^(golua|lua55vm|lua):[[:space:]]*//' \
+    | sed -E 's#^([^:]*/)?(lua5\.5\.0|lua5\.4|golua|lua55vm|lua):[[:space:]]*##' \
     | head -1
 }
 

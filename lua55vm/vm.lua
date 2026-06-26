@@ -594,13 +594,16 @@ function Interp:protected(fn, args)
   end
   -- unwind frame stack back to the protected point, running pending
   -- to-be-closed handlers (inner frames first); a __close error replaces res.
-  for i = #self.frames, saved_n + 1, -1 do
-    local f = self.frames[i]
-    if f.tbc and #f.tbc > 0 then
+  -- Pop each frame BEFORE running its handler so nested calls during __close
+  -- (which push/pop via #self.frames) keep the array contiguous.
+  while #self.frames > saved_n do
+    local top = #self.frames
+    local f = self.frames[top]
+    self.frames[top] = nil
+    if f and f.tbc and #f.tbc > 0 then
       local cok, cerr = pcall(self.close_upvals, self, f, 0, res)
       if not cok then res = cerr end
     end
-    self.frames[i] = nil
   end
   self.depth = saved_depth
   if type(res) == "table" and getmetatable(res) == self.GUEST_ERR_MT then

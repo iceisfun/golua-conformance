@@ -1,10 +1,17 @@
 # lua55vm — a Lua 5.5 interpreter written in Lua
 
 A self-hosted Lua 5.5 interpreter: a lexer, parser, bytecode compiler and
-register-based virtual machine, all written in pure Lua. It runs on the host
-Lua runtime (Lua 5.4 for fast development) and **unchanged on
-[golua](https://github.com/iceisfun/golua)** (the Lua 5.5 reference used as the
-behavioral oracle).
+register-based virtual machine, all written in pure Lua. It runs on a host Lua
+runtime and **unchanged on [golua](https://github.com/iceisfun/golua)**.
+
+The behavioral oracle is the official **`lua5.5.0`** (PUC-Rio); the differential
+harness also runs the interpreter *on* `lua5.5.0` as host. The Lua-specific
+*logic* is implemented from scratch — the table data model and length operator,
+the pattern matcher, `table.sort`, `string.format` validation — rather than
+proxied to the host, so the interpreter exercises these surfaces independently
+and can surface real divergences when run on golua. The host is used only for
+irreducible numeric primitives (the arithmetic operators on numbers,
+transcendental `math.*`, and float↔string digit conversion).
 
 ```
 Lua source ──▶ lexer ──▶ parser ──▶ AST ──▶ compiler ──▶ guest bytecode ──▶ VM ──▶ result
@@ -28,8 +35,9 @@ Correctness is prioritized over performance.
 | `parser.lua`   | Recursive-descent parser → AST (full 5.5 grammar: attribs, goto/labels, numeric/generic for, method calls, varargs, table constructors) |
 | `compiler.lua` | AST → register bytecode: register allocation, constants, jumps, closures/upvalues (open/close), tail calls, multi-return/vararg, local-variable debug info |
 | `vm.lua`       | Bytecode interpreter: registers, call frames, closures, **proper tail calls**, metamethod dispatch, errors/pcall, varinfo error annotations |
-| `runtime.lua`  | Value model (guest tables/closures/threads), metamethod dispatch, arithmetic/comparison/concat/length, tostring/tonumber, chunk-id formatting |
-| `stdlib.lua`   | Standard library (host-backed where safe): base, string, table, math, os, io, coroutine, debug, utf8, package/require, bit32 |
+| `runtime.lua`  | Value model with a native **table data model** (array part + hash + length hint; Lua 5.5 first-hole `#`), native `next`/`rawget`/`rawset`/`sort`; metamethod dispatch, arithmetic/comparison/concat/length, tostring/tonumber, chunk-id formatting |
+| `strmatch.lua` | From-scratch Lua **pattern matcher** (classes, sets, quantifiers, captures, `%b`/`%f`/back-refs) backing find/match/gmatch/gsub — not the host's |
+| `stdlib.lua`   | Standard library: base, string, table, math, os, io, coroutine, debug, utf8, package/require, bit32. Pure-logic parts native; numeric primitives delegate to host |
 | `init.lua`     | Builds a fully-equipped interpreter instance |
 | `run.lua`      | CLI driver |
 | `scripts/`     | `difftest.sh` (differential vs oracle), `run_corpus.sh`, `dis.lua` (disassembler) |

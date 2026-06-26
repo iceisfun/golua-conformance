@@ -15,7 +15,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VMDIR="$(dirname "$HERE")"
 GOLUA="${ORACLE:-${GOLUA:-/usr/bin/lua5.5.0}}"
-HOSTLUA="${HOSTLUA:-lua}"
+HOSTLUA="${HOSTLUA:-lua5.5.0}"
 
 QUIET=0
 if [ "${1:-}" = "-q" ]; then QUIET=1; shift; fi

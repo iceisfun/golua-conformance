@@ -1320,6 +1320,7 @@ local function install_debug(I)
   end)
 
   def("getmetatable", function(I, args)
+    if args.n == 0 then argerror(I, 1, "getmetatable", "value expected") end
     local mt = I:getmeta(args[1])
     return R(mt)
   end)
@@ -1327,6 +1328,10 @@ local function install_debug(I)
   def("setmetatable", function(I, args)
     local t = args[1]
     local mt = args[2]
+    if not (args.n >= 2 and (mt == nil or rt.is_table(mt))) then
+      local got = (args.n < 2) and "no value" or rt.typename(mt)
+      argerror(I, 2, "setmetatable", "nil or table expected, got " .. got)
+    end
     if rt.is_table(t) then t.meta = mt end
     return R(t)
   end)
@@ -1459,6 +1464,7 @@ local function install_utf8(I)
     local s = check_str(I, args, 1, "len")
     local i = opt_int(I, args, 2, "len", 1)
     local j = opt_int(I, args, 3, "len", -1)
+    if args[4] ~= nil then return R(utf8.len(s, i, j, rt.truthy(args[4]))) end
     return R(utf8.len(s, i, j))
   end
   h["offset"] = function(I, args)
@@ -1473,7 +1479,12 @@ local function install_utf8(I)
     local s = check_str(I, args, 1, "codepoint")
     local i = opt_int(I, args, 2, "codepoint", 1)
     local j = opt_int(I, args, 3, "codepoint", i)
-    local res = guarded(I, utf8.codepoint, s, i, j)
+    local res
+    if args[4] ~= nil then
+      res = guarded(I, utf8.codepoint, s, i, j, rt.truthy(args[4]))
+    else
+      res = guarded(I, utf8.codepoint, s, i, j)
+    end
     return { n = res.n - 1, table.unpack(res, 2, res.n) }
   end
   h["codes"] = function(I, args)

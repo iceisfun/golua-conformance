@@ -120,7 +120,9 @@ function MS:single_match(si, pi, ep)
 end
 
 function MS:match_balance(si, pi)
-  if pi + 1 > self.plen then self:err("missing arguments to '%b'") end
+  if pi + 1 > self.plen then
+    self:err("malformed pattern (missing arguments to '%b')")
+  end
   if si > self.slen or byte(self.s, si) ~= byte(self.p, pi) then return nil end
   local b = byte(self.p, pi)
   local e = byte(self.p, pi + 1)
@@ -188,6 +190,7 @@ function MS:match_capture(si, idx)
   end
   local cap = self.caps[idx + 1]
   local len = cap.len
+  if len == CAP_POSITION then return nil end   -- position capture never matches
   if self.slen - si + 1 >= len and
      sub(self.s, cap.init, cap.init + len - 1) == sub(self.s, si, si + len - 1) then
     return si + len

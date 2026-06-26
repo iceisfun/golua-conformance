@@ -16,6 +16,21 @@ local tointeger = math.tointeger
 
 local function truthy(v) return v ~= nil and v ~= false end
 
+local ult = math.ult
+
+-- unsigned 64-bit division of the bit patterns a, b (b ~= 0)
+local function udiv(a, b)
+  if b < 0 then                 -- b >= 2^63 as unsigned
+    return ult(a, b) and 0 or 1
+  end
+  if a >= 0 then return a // b end
+  -- a >= 2^63 as unsigned, b in [1, 2^63): divide via logical halving
+  local q = ((a >> 1) // b) << 1
+  local r = a - q * b           -- remainder bits, in [0, 2b) unsigned
+  if not ult(r, b) then q = q + 1 end
+  return q
+end
+
 -- ---------------------------------------------------------------------------
 -- Construction
 -- ---------------------------------------------------------------------------
@@ -590,11 +605,13 @@ function Interp:exec_loop(frame)
         if skip or not run then
           pc = ins.b
         else
+          -- iteration count via UNSIGNED arithmetic (handles the full integer
+          -- range without overflow), exactly like Lua's forprep
           local count
           if step > 0 then
-            count = (ilimit - init) // step
+            count = udiv(ilimit - init, step)
           else
-            count = (init - ilimit) // (-step)
+            count = udiv(init - ilimit, (-(step + 1)) + 1)
           end
           frame.loopstate[a] = { int = true, count = count, step = step }
           R[a] = init

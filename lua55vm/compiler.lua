@@ -867,7 +867,7 @@ local function compile_genfor(fs, node)
   local b = fs:enter_block(true)
   for i = 1, nvars do
     fs:reserve(1)
-    fs:new_local(node.names[i], base + 4 + (i - 1), nil)
+    fs:new_local(node.names[i], base + 4 + (i - 1), "const")  -- 5.5: read-only
   end
   local loopstart = fs:here()
   compile_block(fs, node.body)

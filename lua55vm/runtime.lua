@@ -570,7 +570,9 @@ function M.install(Interp)
 
   function Interp:concat(a, b)
     if concatable(a) and concatable(b) then
-      return self:tostr_concat(a) .. self:tostr_concat(b)
+      local r = self:tostr_concat(a) .. self:tostr_concat(b)
+      if self.gc_pressure then self:gc_pressure(#r) end   -- new-string GC pressure
+      return r
     end
     local h = self:metamethod(a, "__concat") or self:metamethod(b, "__concat")
     if h ~= nil then

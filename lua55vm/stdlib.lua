@@ -1705,17 +1705,37 @@ local function install_debug(I)
   def("upvalueid", function(I, args)
     local f = args[1]
     local n = check_int(I, args, 2, "upvalueid")
-    if not rt.is_closure(f) then typeerror(I, 1, "upvalueid", "function", args) end
-    local uv = f.upvals[n]
-    if uv == nil then argerror(I, 2, "upvalueid", "invalid upvalue index") end
-    return R(uv)   -- the upvalue object serves as a unique id (userdata-like)
+    if rt.is_closure(f) then
+      -- out-of-range index returns nil (lua_upvalueid returns NULL), not an error
+      return R(f.upvals[n])   -- the upvalue object is a unique id (userdata-like)
+    elseif type(f) == "function" then
+      -- native (C) function upvalues aren't introspectable; synthesize a stable
+      -- unique id per (function, index) so upvalueid(C-closure, k) ~= nil
+      I.native_upvalids = I.native_upvalids or setmetatable({}, { __mode = "k" })
+      local m = I.native_upvalids[f]
+      if not m then m = {}; I.native_upvalids[f] = m end
+      if m[n] == nil then m[n] = setmetatable({}, { __name = "upvalue" }) end
+      return R(m[n])
+    end
+    typeerror(I, 1, "upvalueid", "function", args)
   end)
   def("upvaluejoin", function(I, args)
-    local f1, n1, f2, n2 = args[1], check_int(I, args, 2, "upvaluejoin"),
-      args[3], check_int(I, args, 4, "upvaluejoin")
-    if rt.is_closure(f1) and rt.is_closure(f2) then
-      f1.upvals[n1] = f2.upvals[n2]
+    -- like Lua's checkupval: each function must be a Lua closure and each index
+    -- must be in range, else a (catchable) error
+    local function checkupval(fidx, nidx)
+      local f = args[fidx]
+      if not rt.is_closure(f) then
+        argerror(I, fidx, "upvaluejoin", "Lua function expected")
+      end
+      local n = check_int(I, args, nidx, "upvaluejoin")
+      if n < 1 or n > #f.upvals then
+        argerror(I, nidx, "upvaluejoin", "invalid upvalue index")
+      end
+      return f, n
     end
+    local f1, n1 = checkupval(1, 2)
+    local f2, n2 = checkupval(3, 4)
+    f1.upvals[n1] = f2.upvals[n2]
     return EMPTY
   end)
   def("sethook", function(I, args)

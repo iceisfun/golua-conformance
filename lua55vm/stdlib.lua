@@ -346,13 +346,16 @@ local function install_base(I)
       chunkname = chunkname or chunk
     elseif rt.is_callable(chunk) then
       local parts = {}
+      local bad = false
       while true do
-        local r = I:call(chunk, { n = 0 })
+        local ok, r = I:protected(chunk, { n = 0 })   -- catch reader errors
+        if not ok then return R(nil, r) end
         local piece = r[1]
         if piece == nil or piece == "" then break end
-        if type(piece) ~= "string" then break end
+        if type(piece) ~= "string" then bad = true; break end
         parts[#parts + 1] = piece
       end
+      if bad then return R(nil, "reader function must return a string") end
       src = table.concat(parts)
       chunkname = chunkname or "=(load)"
     else

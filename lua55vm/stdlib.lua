@@ -602,12 +602,15 @@ local function install_string(I)
           argi = argi + 1
           local v = args[argi]
           local t = type(v)
+          local ptr
           if t == "string" or rt.is_table(v) or rt.is_closure(v)
              or rt.is_thread(v) or t == "function" then
-            out[#out + 1] = hostfmt("0x%012x", I:object_id(v))
+            ptr = hostfmt("0x%012x", I:object_id(v))
           else
-            out[#out + 1] = "(null)"   -- nil/number/boolean have no pointer
+            ptr = "(null)"   -- nil/number/boolean have no pointer
           end
+          -- apply the field width / flags via a %s conversion
+          out[#out + 1] = hostfmt(spec:sub(1, -2) .. "s", ptr)
         elseif conv == "q" then
           if spec ~= "%q" then
             I:rt_error("specifier '%q' cannot have modifiers")
@@ -1683,7 +1686,11 @@ local function install_utf8(I)
   h["codes"] = function(I, args)
     local s = check_str(I, args, 1, "codes")
     local it, st, ctrl = utf8.codes(s)
-    return R(function(I2, a2) return R(it(st, a2[2])) end, s, 0)
+    return R(function(I2, a2)
+      local r = pack(pcall(it, st, a2[2]))
+      if not r[1] then I2:rt_error((tostring(r[2]):gsub("^.-:%d+: ", ""))) end
+      return { n = r.n - 1, table.unpack(r, 2, r.n) }
+    end, s, 0)
   end
 end
 

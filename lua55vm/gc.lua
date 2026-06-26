@@ -29,14 +29,24 @@ function M.install(Interp)
       bytes = 0,           -- rough allocated-size estimate (for count)
       epoch = 0,
       weaklist = nil,
+      threshold = 200000,  -- auto-collect when 'bytes' reaches this
+      due = false,         -- a collection is pending (run at next safe point)
+      in_gc = false,       -- re-entrancy guard (finalizers run guest code)
     }
-    -- register every newly created table/closure; threads register explicitly
+    -- register every newly created table/closure; threads register explicitly.
+    -- When allocation crosses the threshold, flag a collection to run at the
+    -- next VM safe point (collecting mid-allocation would free the un-rooted
+    -- object being built).
     rt.gc_hook = function(o)
       local gc = self.gc
       gc.objects[#gc.objects + 1] = o
       gc.bytes = gc.bytes + 64
+      if not gc.in_gc and gc.bytes >= gc.threshold then gc.due = true end
     end
   end
+
+  -- GC step size between automatic collections (rough bytes of new allocation)
+  local GCSTEP = 100000
 
   -- register an object (used for threads, created outside rt.new_table)
   function Interp:gc_register(o)
@@ -158,6 +168,9 @@ function M.install(Interp)
   function Interp:gc_collect()
     local gc = self.gc
     if gc == nil then return 0 end
+    if gc.in_gc then return gc.bytes end   -- no re-entrant collection
+    gc.in_gc = true
+    gc.due = false
     gc.epoch = gc.epoch + 1
     gc.weaklist = {}
 
@@ -202,6 +215,9 @@ function M.install(Interp)
       end
     end
     if gc.bytes < 0 then gc.bytes = 0 end
+    -- schedule the next automatic collection after another GCSTEP of allocation
+    gc.threshold = gc.bytes + GCSTEP
+    gc.in_gc = false
     return gc.bytes
   end
 

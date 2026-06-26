@@ -449,6 +449,9 @@ function Interp:exec_loop(frame)
   while true do
     local ins = code[pc]
     frame.savedpc = pc
+    -- automatic GC at a safe point (all live values are in marked registers)
+    local _gc = self.gc
+    if _gc and _gc.due then self:gc_collect() end
     -- debug hooks (count / line)
     local hk = self.hook
     if hk and not self.in_hook then

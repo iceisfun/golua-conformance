@@ -301,10 +301,22 @@ local function install_base(I)
   def("collectgarbage", function(I, args)
     local opt = args[1] or "collect"
     if opt == "collect" then
+      I.gc_step_accum = 0
       I:gc_collect()
       return R(0)
     elseif opt == "step" then
-      I:gc_collect()
+      -- Our GC is stop-the-world, but Lua's 'step' returns true only when a
+      -- whole collection cycle completes. Fake incremental progress with a work
+      -- accumulator so `repeat until collectgarbage("step", n)` terminates and
+      -- larger step sizes finish in fewer steps (gc.lua's dosteps).
+      local siz = args[2]
+      if type(siz) ~= "number" then siz = 1000 end   -- no-size step: complete now
+      I.gc_step_accum = (I.gc_step_accum or 0) + siz
+      if I.gc_step_accum >= 100 then
+        I.gc_step_accum = 0
+        I:gc_collect()
+        return R(true)            -- completed a collection cycle
+      end
       return R(false)
     elseif opt == "count" then
       local b = I.gc and I.gc.bytes or 0
@@ -319,6 +331,21 @@ local function install_base(I)
       return R(prev)
     elseif opt == "setpause" or opt == "setstepmul" then
       return R(0)
+    elseif opt == "param" then
+      -- Lua 5.5: collectgarbage("param", name [, value]) gets/sets a GC tuning
+      -- parameter, returning the old value. Our GC ignores them, but we store
+      -- and report them so the get/set round-trips like PUC.
+      I.gc_params = I.gc_params or { pause = 200, stepmul = 100, stepsize = 13,
+        minormul = 25, majorminor = 100, minormajor = 20 }
+      local name = check_str(I, args, 2, "collectgarbage")
+      local old = I.gc_params[name]
+      if old == nil then
+        argerror(I, 2, "collectgarbage", "invalid parameter '" .. name .. "'")
+      end
+      if args.n >= 3 and args[3] ~= nil then
+        I.gc_params[name] = check_int(I, args, 3, "collectgarbage")
+      end
+      return R(old)
     else
       argerror(I, 1, "collectgarbage", "invalid option '" .. tostring(opt) .. "'")
     end

@@ -1353,6 +1353,18 @@ local function install_debug(I)
         h["nups"] = #p.upvals
         h["isvararg"] = p.is_vararg
       end
+      -- name info ("n"): how this function was called, seen from its caller
+      if what:find("n", 1, true) then
+        h["namewhat"] = ""
+        local caller = I.frames[#I.frames - level - 1]
+        if caller and caller.cl and not caller.native and caller.proto then
+          local ci = caller.proto.code[caller.savedpc]
+          if ci and (ci.op == "CALL" or ci.op == "TAILCALL") then
+            local kind, nm = I:reg_name(caller.cl, caller.savedpc, ci.a)
+            if kind and nm then h["name"] = nm; h["namewhat"] = kind end
+          end
+        end
+      end
     elseif rt.is_closure(f) then
       local p = f.proto
       h["source"] = p.chunkname or ("@" .. p.source)

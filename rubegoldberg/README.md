@@ -43,8 +43,16 @@ non-determinism guard, classifier, and an automatic stage-level reducer.
   captures, **stateful metatables** (`__add` cycles op by invocation count),
   **self-modifying metatables** (`__index` rewrites itself mid-lookup),
   `table.sort` with a comparator, recursion (gcd), `pcall` round-trips, vararg
-  `select`, and deep lexical shadowing. Add more by dropping a generator into
-  `STAGES`.
+  `select`, deep lexical shadowing; **error stages** (`err_*_ml`) that split a
+  faulting operator/field across lines to stress error-line attribution;
+  **float/format stages** (`float_format_battery`, `math_exact`,
+  `intfloat_boundary`) that emit `%g`/`%.Ng`/`%#g`/`%e`/`%a`/`tostring` and the
+  int-vs-float result typing of `math.floor/ceil/modf/fmod/tointeger/type/...`
+  over deterministic exact values; and **terminal/negative stages**
+  (`assert_flag`, `error_terminus`) that deliberately raise so the differential
+  also covers the failure path (assert / `error` level semantics + value
+  formatting in the message). Add more by dropping a generator into `STAGES`
+  (follow the determinism rules in the module docstring).
 
 ## Pipeline
 

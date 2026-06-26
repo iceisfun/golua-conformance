@@ -329,8 +329,95 @@ def err_custom(rng):
     )
 
 
+# ---------------------------------------------------------------------------
+# Float / formatting / math stages. These emit FORMATTED-STRING observations
+# (the actual divergence surface: %g / %.Ng / %a / %e / tostring, and the
+# int-vs-float result typing of math.*) but RETURN the integer accumulator
+# unchanged, so any float-formatting drift is localized to one transcript line
+# instead of poisoning the whole chain. Values are chosen to be deterministic in
+# both engines (exact binary fractions k/2^m, fixed literals, inf — never NaN,
+# whose sign is platform-defined and a documented wontfix).
+# ---------------------------------------------------------------------------
+def float_format_battery(rng):
+    return (
+        "  local vals = { 0.0, 0.5, 0.1, 0.25, 0.125, 1.5, 3.14159, 2.5,\n"
+        "                 100.0, 1e15, 1e-5, 1e300, 1e-300, 1/0, -1/0,\n"
+        "                 (x % 17) + 0.5, -(x % 13) - 0.25 }\n"
+        "  for i = 1, #vals do\n"
+        "    local f = vals[i]\n"
+        "    emit('g' .. i, string.format('%g', f))\n"
+        "    emit('Ng' .. i, string.format('%.5g', f) .. '|' .. string.format('%.17g', f) .. '|' .. string.format('%.0g', f))\n"
+        "    emit('hashg' .. i, string.format('%#g', f))\n"
+        "    emit('e' .. i, string.format('%e', f))\n"
+        "    emit('a' .. i, string.format('%a', f))\n"
+        "    emit('ts' .. i, tostring(f))\n"
+        "  end\n"
+        "  return x\n"
+    )
+
+
+def math_exact(rng):
+    d = _pos(rng, 1, 97)
+    return (
+        "  local n = (x % 200000) - 100000\n"
+        "  local f = n + (x % 8) / 8.0\n"          # exact binary fraction
+        "  emit('floor', tostring(math.floor(f)))\n"
+        "  emit('ceil', tostring(math.ceil(f)))\n"
+        "  emit('abs', tostring(math.abs(n)) .. '|' .. string.format('%g', math.abs(f)))\n"
+        "  local ip, fp = math.modf(f)\n"
+        "  emit('modf', string.format('%g|%g', ip, fp))\n"
+        f"  emit('fmod', string.format('%g', math.fmod(n, {d})))\n"
+        "  emit('toint', tostring(math.tointeger(f)) .. ',' .. tostring(math.tointeger(n + 0.0)))\n"
+        "  emit('type', tostring(math.type(f)) .. ',' .. tostring(math.type(n)) .. ',' .. tostring(math.type('x')))\n"
+        f"  emit('maxmin', tostring(math.max(n, {d}, -7)) .. ',' .. tostring(math.min(n, {d}, 11)))\n"
+        "  return x\n"
+    )
+
+
+def intfloat_boundary(rng):
+    return (
+        "  local a = (x % 100) - 50\n"
+        "  local b = (x % 7) + 1\n"
+        "  emit('idiv', tostring(a // b) .. ',' .. tostring((a + 0.0) // b))\n"     # int vs float //
+        "  emit('mod', tostring(a % b) .. ',' .. tostring((a + 0.0) % b))\n"
+        "  emit('disp', tostring(a) .. ',' .. tostring(a + 0.0) .. ',' .. tostring(a * 1.0))\n"  # '2' vs '2.0'
+        "  emit('pow', tostring(2^10) .. ',' .. tostring((-2)^3))\n"                 # ^ is always float
+        "  emit('big', tostring(9007199254740992) .. ',' .. tostring(9007199254740993))\n"
+        "  emit('lim', tostring(math.maxinteger) .. ',' .. tostring(math.mininteger))\n"
+        "  emit('wrap', tostring(math.maxinteger + 1) .. ',' .. tostring(math.mininteger - 1))\n"
+        "  emit('fmt', string.format('%d|%x|%i', a, a & 0xff, a))\n"
+        "  return x\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Terminal / negative stages: deliberately raise so the differential also covers
+# the FAILURE path (assert / error level semantics + value formatting in the
+# message). A "negative positive": both engines must fail identically.
+# ---------------------------------------------------------------------------
+def assert_flag(rng):
+    w = _pos(rng, 1, 1_000_000)
+    return (
+        f"  assert(x == {w}, 'flag-mismatch:' .. x)\n"   # almost always fails
+        "  return x\n"
+    )
+
+
+def error_terminus(rng):
+    lvl = rng.choice([0, 1, 2])
+    return (
+        f"  error('terminus[' .. (x & 0xffff) .. ']', {lvl})\n"
+        "  return x\n"
+    )
+
+
 # All stage generators, by family. The generator picks from these.
 STAGES = {
+    "float_format_battery": float_format_battery,
+    "math_exact": math_exact,
+    "intfloat_boundary": intfloat_boundary,
+    "assert_flag": assert_flag,
+    "error_terminus": error_terminus,
     "err_index_ml": err_index_ml,
     "err_call_ml": err_call_ml,
     "err_arith_ml": err_arith_ml,

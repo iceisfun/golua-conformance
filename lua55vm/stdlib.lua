@@ -167,6 +167,7 @@ local function install_base(I)
       I:rt_error("cannot change a protected metatable")
     end
     t.meta = mt
+    I:gc_check_finalizer(t, mt)
     return R(t)
   end)
 
@@ -280,13 +281,15 @@ local function install_base(I)
   I.gc_mode = "generational"   -- Lua 5.5 default
   def("collectgarbage", function(I, args)
     local opt = args[1] or "collect"
-    if opt == "collect" or opt == "step" then
-      collectgarbage("collect")
-      if opt == "step" then return R(false) end
+    if opt == "collect" then
+      I:gc_collect()
       return R(0)
+    elseif opt == "step" then
+      I:gc_collect()
+      return R(false)
     elseif opt == "count" then
-      local kb = collectgarbage("count")
-      return R(kb, 0)
+      local b = I.gc and I.gc.bytes or 0
+      return R(b / 1024.0, b % 1024)
     elseif opt == "stop" or opt == "restart" then
       return R(0)
     elseif opt == "isrunning" then
@@ -1188,6 +1191,7 @@ local function install_coroutine(I)
 
   local function new_thread(f)
     local th = setmetatable({ frames = {}, depth = 0 }, rt.THREAD_MT)
+    I:gc_register(th)
     th.co = coroutine.create(function(...)
       local a = pack(...)
       local res = I:call(f, a)

@@ -62,11 +62,17 @@ end
 -- A guest table has an array part (arr[1..asize], holes allowed), a hash part
 -- (host table, for everything else), and a length hint, mirroring Lua's own
 -- table so the length operator and iteration are our own logic.
+-- M.gc_hook, if set by the GC, is called with each newly created collectable
+-- object so the collector can track it.
+M.gc_hook = nil
+
 function M.new_table(narr)
   narr = narr or 0
-  return setmetatable({
+  local t = setmetatable({
     arr = {}, asize = narr, hash = {}, lenhint = narr // 2, meta = nil,
   }, TABLE_MT)
+  if M.gc_hook then M.gc_hook(t) end
+  return t
 end
 
 local hostrawget = rawget
@@ -251,7 +257,9 @@ function M.is_closure(v) return type(v) == "table" and getmetatable(v) == CLOSUR
 function M.is_thread(v)  return type(v) == "table" and getmetatable(v) == THREAD_MT end
 
 function M.new_closure(proto, upvals)
-  return setmetatable({ proto = proto, upvals = upvals }, CLOSURE_MT)
+  local c = setmetatable({ proto = proto, upvals = upvals }, CLOSURE_MT)
+  if M.gc_hook then M.gc_hook(c) end
+  return c
 end
 
 -- guest type name of a value

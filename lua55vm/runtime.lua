@@ -184,36 +184,40 @@ end
 
 M.border = M.getn   -- back-compat alias
 
--- native quicksort (median-of-three) with invalid-order detection, matching
--- Lua's table.sort error "invalid order function for sorting".
-function M.sort(I, a, n, less)
+-- native quicksort (median-of-three) operating in place through getf/setf
+-- (which go through the table's __index/__newindex), with invalid-order
+-- detection matching Lua's "invalid order function for sorting".
+function M.sort(I, n, getf, setf, less)
+  local function swap(x, y)
+    local vx, vy = getf(x), getf(y)
+    setf(x, vy); setf(y, vx)
+  end
   local function auxsort(lo, up)
     while lo < up do
-      if less(a[up], a[lo]) then a[lo], a[up] = a[up], a[lo] end
+      if less(getf(up), getf(lo)) then swap(lo, up) end
       if up - lo == 1 then return end
       local p = (lo + up) // 2
-      if less(a[p], a[lo]) then a[p], a[lo] = a[lo], a[p]
-      elseif less(a[up], a[p]) then a[p], a[up] = a[up], a[p] end
+      if less(getf(p), getf(lo)) then swap(p, lo)
+      elseif less(getf(up), getf(p)) then swap(p, up) end
       if up - lo == 2 then return end
-      a[p], a[up - 1] = a[up - 1], a[p]
-      local pivot = a[up - 1]
+      swap(p, up - 1)
+      local pivot = getf(up - 1)
       local i, j = lo, up - 1
       while true do
         i = i + 1
-        while less(a[i], pivot) do
+        while less(getf(i), pivot) do
           if i >= up then I:rt_error("invalid order function for sorting") end
           i = i + 1
         end
         j = j - 1
-        while less(pivot, a[j]) do
+        while less(pivot, getf(j)) do
           if j <= lo then I:rt_error("invalid order function for sorting") end
           j = j - 1
         end
         if i >= j then break end
-        a[i], a[j] = a[j], a[i]
+        swap(i, j)
       end
-      a[up - 1], a[i] = a[i], a[up - 1]
-      -- recurse into the smaller half, loop on the larger (bounded depth)
+      swap(up - 1, i)
       if i - lo < up - i then
         auxsort(lo, i - 1); lo = i + 1
       else

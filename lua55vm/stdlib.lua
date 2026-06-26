@@ -153,7 +153,7 @@ local function install_base(I)
   def("rawlen", function(I, args)
     local v = args[1]
     if type(v) == "string" then return R(#v) end
-    if rt.is_table(v) then return R(rt.border(v.hash)) end
+    if rt.is_table(v) then return R(rt.getn(v)) end
     argerror(I, 1, "rawlen", "table or string expected")
   end)
 
@@ -254,13 +254,14 @@ local function install_base(I)
   def("rawnext", G.hash["next"])  -- internal helper alias (host next is fine)
 
   def("pairs", function(I, args)
+    if args.n == 0 then argerror(I, 1, "pairs", "table expected, got no value") end
     local t = args[1]
     local h = I:metamethod(t, "__pairs")
     if h ~= nil then
       local res = I:call(h, { t, n = 1 })
       return R(res[1], res[2], res[3])
     end
-    check_table(I, args, 1, "pairs")
+    -- no validation here: pairs(non-table) succeeds; next() errors when iterated
     return R(G.hash["next"], t, nil)
   end)
 
@@ -272,7 +273,7 @@ local function install_base(I)
     return R(i, v)
   end
   def("ipairs", function(I, args)
-    if args[1] == nil then argerror(I, 1, "ipairs", "table expected, got no value") end
+    if args.n == 0 then argerror(I, 1, "ipairs", "table expected, got no value") end
     return R(inext, args[1], 0)
   end)
 
@@ -623,7 +624,10 @@ local function install_table(I)
   G.hash["table"] = lib
   local function def(name, fn) lib.hash[name] = fn end
 
-  local rget, rset, rgetn = rt.rawget, rt.rawset, rt.getn
+  -- table functions access elements through metamethods (lua_geti/seti/luaL_len)
+  local function rget(t, k) return I:index(t, k) end
+  local function rset(t, k, v) I:setindex(t, k, v) end
+  local function rgetn(t) return I:len(t) end
 
   def("insert", function(I, args)
     local t = check_table(I, args, 1, "insert")
@@ -645,18 +649,20 @@ local function install_table(I)
 
   def("remove", function(I, args)
     local t = check_table(I, args, 1, "remove")
-    local len = rgetn(t)
-    local pos = opt_int(I, args, 2, "remove", len)
-    if len == 0 and args.n < 2 then return R(nil) end
-    if len + 1 == pos then
-      local v = rget(t, pos); rset(t, pos, nil); return R(v)
-    end
-    if args.n >= 2 and (pos < 1 or pos > len + 1) and len > 0 then
-      argerror(I, 2, "remove", "position out of bounds")
+    local size = rgetn(t)
+    local pos = opt_int(I, args, 2, "remove", size)
+    if pos ~= size then
+      -- validate: 1 <= pos <= size+1  (Lua's unsigned (pos-1) <= size)
+      if pos < 1 or pos > size + 1 then
+        argerror(I, 2, "remove", "position out of bounds")
+      end
     end
     local v = rget(t, pos)
-    for i = pos, len - 1 do rset(t, i, rget(t, i + 1)) end
-    rset(t, len, nil)
+    while pos < size do
+      rset(t, pos, rget(t, pos + 1))
+      pos = pos + 1
+    end
+    rset(t, pos, nil)
     return R(v)
   end)
 
@@ -682,11 +688,18 @@ local function install_table(I)
   end)
 
   def("unpack", function(I, args)
-    local t = check_table(I, args, 1, "unpack")
+    -- works on anything indexable (uses __index/__len), not just tables
+    local t = args[1]
     local i = opt_int(I, args, 2, "unpack", 1)
-    local j = opt_int(I, args, 3, "unpack", rgetn(t))
-    local out = { n = math.max(0, j - i + 1) }
-    for k = i, j do out[k - i + 1] = rget(t, k) end
+    local j
+    if args[3] ~= nil then j = check_int(I, args, 3, "unpack") else j = I:len(t) end
+    if i > j then return { n = 0 } end
+    local count = j - i + 1
+    if count < 0 or count >= 0x7FFFFFFF then
+      I:rt_error("too many results to unpack")
+    end
+    local out = { n = count }
+    for k = i, j do out[k - i + 1] = I:index(t, k) end
     return out
   end)
   G.hash["unpack"] = nil  -- not a global in 5.4+
@@ -705,10 +718,11 @@ local function install_table(I)
   end)
 
   def("move", function(I, args)
-    local a1 = check_table(I, args, 1, "move")
+    -- Lua checks the integer args (#2,#3,#4) before the table args (#1,#5)
     local f = check_int(I, args, 2, "move")
     local e = check_int(I, args, 3, "move")
     local d = check_int(I, args, 4, "move")
+    local a1 = check_table(I, args, 1, "move")
     local a2 = args[5]
     if a2 == nil then a2 = a1 else a2 = check_table(I, args, 5, "move") end
     if e >= f then
@@ -728,8 +742,6 @@ local function install_table(I)
       typeerror(I, 2, "sort", "function", args)
     end
     local n = rgetn(t)
-    local arr = {}
-    for i = 1, n do arr[i] = rget(t, i) end
     local less
     if comp == nil then
       less = function(x, y) return I:lt(x, y) end
@@ -738,8 +750,8 @@ local function install_table(I)
         return rt.truthy(I:call(comp, { x, y, n = 2 })[1])
       end
     end
-    rt.sort(I, arr, n, less)
-    for i = 1, n do rset(t, i, arr[i]) end
+    rt.sort(I, n, function(i) return rget(t, i) end,
+            function(i, v) rset(t, i, v) end, less)
     return EMPTY
   end)
 end

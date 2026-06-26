@@ -184,7 +184,11 @@ end
 
 -- register a new active local at the current freereg base `reg`
 function FS:new_local(name, reg, attrib, near, near_line)
-  if #self.actvars >= 200 then
+  -- the 200 limit counts register-using locals only (gdecl markers don't use a
+  -- register, so `global x; local y` repeated doesn't blow the limit)
+  local nlocals = 0
+  for _, av in ipairs(self.actvars) do if not av.is_gdecl then nlocals = nlocals + 1 end end
+  if nlocals >= 200 then
     local where = self.is_main and "main function"
       or string.format("function <%s:%d>", self.proto.source, self.proto.line or 0)
     error(string.format("%s:%d: too many local variables (limit is 200) in %s near %s",
@@ -229,33 +233,51 @@ end
 
 -- under strict global declarations, an undeclared global access is an error
 function FS:check_global_read(name, line)
-  local g = self.gdecl
-  if not g.allowall and not g.declared[name] then
+  if self:global_status(name) == "strict" then
     error(string.format("%s:%d: variable '%s' not declared",
       self.proto.source, line or 0, name), 0)
   end
 end
 
+-- resolve the _ENV used to access global `varname`; if _ENV itself was declared
+-- a global (`global _ENV`), there is no environment to index through
+function FS:env_for_global(varname, line)
+  local ek, ew = self:resolve("_ENV")
+  if ek == "global" then
+    error(string.format("%s:%d: _ENV is global when accessing variable '%s'",
+      self.proto.source, line or 0, varname), 0)
+  end
+  return ek, ew
+end
+
 function FS:check_global_write(name, line)
-  if self.gdecl.const[name] then
+  local st = self:global_status(name)
+  if st == "strict" then
+    error(string.format("%s:%d: variable '%s' not declared",
+      self.proto.source, line or 0, name), 0)
+  elseif st == "const" then
     error(string.format("%s:%d: attempt to assign to const variable '%s'",
       self.proto.source, line or 0, name), 0)
   end
 end
 
--- a `global` declaration is block-scoped for goto purposes (you cannot jump
--- into its scope), like a local -- but it holds no register and is invisible to
--- name resolution. Record a scope marker (name "*" for `global *`).
-function FS:add_gdecl_scope(name)
+-- a `global` declaration is block-scoped (like a local) -- it holds no register
+-- but it (a) is a goto scope barrier and (b) makes its name resolve to a global
+-- within its scope, shadowing any outer local. Name "*" matches no specific
+-- name (it just marks "all globals allowed"). Records the const-ness too.
+function FS:add_gdecl_scope(name, gconst)
   self.actvars[#self.actvars + 1] =
-    { name = name, reg = self.freereg, is_gdecl = true, captured = false }
+    { name = name, reg = self.freereg, is_gdecl = true, gconst = gconst,
+      captured = false }
 end
 
--- resolve a name: returns "local",reg | "upval",idx | "global"
+-- resolve a name: returns "local",reg,av | "upval",idx | "global"
 function FS:resolve(name)
   for i = #self.actvars, 1, -1 do
     local av = self.actvars[i]
-    if not av.is_gdecl and av.name == name then
+    if av.is_gdecl then
+      if av.name == name then return "global" end   -- declared global (shadows outer local)
+    elseif av.name == name then
       return "local", av.reg, av
     end
   end
@@ -271,8 +293,30 @@ function FS:resolve(name)
     elseif kind == "upval" then
       return "upval", self:add_upval(name, false, where)
     end
+    -- kind == "global": inherit (it is accessed via this function's _ENV)
   end
   return "global"
+end
+
+-- status of a global name for declaration enforcement:
+-- "ok" (declared / wildcard / no declarations) | "const" | "strict" (undeclared
+-- while a global declaration is in scope). Walks enclosing functions too.
+function FS:global_status(name)
+  local f = self
+  local any = false
+  while f do
+    for i = #f.actvars, 1, -1 do
+      local av = f.actvars[i]
+      if av.is_gdecl then
+        any = true
+        if av.name == "*" or av.name == name then
+          return av.gconst and "const" or "ok"
+        end
+      end
+    end
+    f = f.parent
+  end
+  return any and "strict" or "ok"
 end
 
 -- ---------------------------------------------------------------------------
@@ -307,7 +351,7 @@ function exp2reg(fs, node, reg)
     else
       -- global: _ENV[name]
       fs:check_global_read(node.name, node.line)
-      local ek, ew = fs:resolve("_ENV")
+      local ek, ew = fs:env_for_global(node.name, node.line)
       if ek == "local" then
         fs:emit("GETFIELD", reg, ew, fs:K(node.name), node.line)
       else
@@ -619,7 +663,7 @@ local function store_to(fs, target, vreg)
       fs:emit("SETUPVAL", vreg, where, nil, target.line)
     else
       fs:check_global_write(target.name, target.line)
-      local ek, ew = fs:resolve("_ENV")
+      local ek, ew = fs:env_for_global(target.name, target.line)
       if ek == "local" then
         fs:emit("SETFIELD", ew, fs:K(target.name), vreg, target.line)
       else
@@ -979,37 +1023,63 @@ function compile_stmt(fs, node)
   elseif tag == "Goto" then compile_goto(fs, node)
   elseif tag == "Label" then compile_label(fs, node)
   elseif tag == "Global" then
-    local g = fs.gdecl
-    if node.star then
-      g.allowall = true
-    else
-      -- track declared globals (permissive on undeclared use — enforcing
-      -- "variable not declared" requires block-scoped decls; we only enforce
-      -- <const> on explicitly named globals, which is unambiguous).
-      for _, nm in ipairs(node.names) do
-        g.declared[nm] = true
-        g.const[nm] = nil   -- a (re)declaration's own init may assign
-      end
-      -- `global names = exprs` (or `global function f ...`) initializes; this
-      -- assignment must run BEFORE marking const (init of a const is allowed).
-      if node.exprs then
-        local targets = {}
-        for _, nm in ipairs(node.names) do
-          targets[#targets + 1] = { tag = "Name", name = nm, line = node.line }
-        end
-        compile_assign(fs, { tag = "Assign", targets = targets,
-          exprs = node.exprs, line = node.line })
-      end
-      for i, nm in ipairs(node.names) do
-        if node.attribs[i] == "const" then g.const[nm] = true end
+    -- a `global` declaration is block-scoped: each declared name (or "*") is
+    -- recorded as a gdecl actvar (a goto scope barrier + makes the name resolve
+    -- to a global within scope). The declarations make undeclared globals an
+    -- error in their scope (global_status). <close> is not allowed on globals.
+    local function no_close(attr)
+      if attr == "close" then
+        error(string.format("%s:%d: global variables cannot be to-be-closed",
+          fs.proto.source, node.line or 0), 0)
       end
     end
-    -- record a goto scope barrier for the declaration (so a goto cannot jump
-    -- into the scope of a `global *` / `global name`)
     if node.star then
-      fs:add_gdecl_scope("*")
+      no_close(node.attrib)
+      fs:add_gdecl_scope("*", node.attrib == "const")
     else
-      for _, nm in ipairs(node.names) do fs:add_gdecl_scope(nm) end
+      for i = 1, #node.names do no_close(node.attribs[i]) end
+      local entries = {}
+      if node.is_function then
+        -- `global function f`: declare and activate f BEFORE its body, so the
+        -- body can reference f (recursion), then store the closure to it
+        fs:add_gdecl_scope(node.names[1], false)
+        entries[1] = fs.actvars[#fs.actvars]
+        compile_assign(fs, { tag = "Assign",
+          targets = { { tag = "Name", name = node.names[1], line = node.line } },
+          exprs = node.exprs, line = node.line })
+      else
+        -- `global names [= exprs]`: evaluate the init in the OUTER scope (the new
+        -- globals are not active yet), assign to the forced globals, THEN declare
+        if node.exprs then
+          local base = fs.freereg
+          local nvars = #node.names
+          adjust_explist(fs, node.exprs, base, nvars)
+          local temp = base + nvars
+          fs:checkstack(temp)
+          for i, nm in ipairs(node.names) do
+            local ek, ew = fs:env_for_global(nm, node.line)
+            -- runtime check: the global must be undefined (nil) before being set
+            if ek == "local" then
+              fs:emit("GETFIELD", temp, ew, fs:K(nm), node.line)
+              fs:emit("ERRNNIL", temp, fs:K(nm), nil, node.line)
+              fs:emit("SETFIELD", ew, fs:K(nm), base + i - 1, node.line)
+            else
+              fs:emit("GETTABUP", temp, ew, fs:K(nm), node.line)
+              fs:emit("ERRNNIL", temp, fs:K(nm), nil, node.line)
+              fs:emit("SETTABUP", ew, fs:K(nm), base + i - 1, node.line)
+            end
+          end
+          fs.freereg = base
+        end
+        for _, nm in ipairs(node.names) do
+          fs:add_gdecl_scope(nm, false)
+          entries[#entries + 1] = fs.actvars[#fs.actvars]
+        end
+      end
+      -- apply <const> (a const's own initialization above was allowed)
+      for i, av in ipairs(entries) do
+        if node.attribs[i] == "const" then av.gconst = true end
+      end
     end
   else error("compiler: unknown statement " .. tostring(tag)) end
 end

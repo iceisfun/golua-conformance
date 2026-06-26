@@ -202,7 +202,7 @@ function Parser:global_stat()
     local name = self:expect_name()
     local func = self:funcbody(line, false)
     return { tag = "Global", names = { name }, attribs = { default_attr },
-             star = false, exprs = { func }, line = line }
+             star = false, exprs = { func }, is_function = true, line = line }
   end
   if self:is("*") then
     self:advance()

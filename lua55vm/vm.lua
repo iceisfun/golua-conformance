@@ -821,6 +821,11 @@ function Interp:exec_loop(frame)
         self:rt_error("variable '" .. nm .. "' got a non-closable value")
       end
       frame.tbc[#frame.tbc + 1] = a
+    elseif op == "ERRNNIL" then
+      -- a `global name = ...` declaration: the global must be undefined (nil)
+      if R[a] ~= nil then
+        self:rt_error("global '" .. tostring(K[ins.b]) .. "' already defined")
+      end
     else
       error("vm: unknown opcode " .. tostring(op))
     end

@@ -1487,8 +1487,35 @@ local function install_debug(I)
     end
     return EMPTY
   end)
-  def("sethook", function(I, args) return EMPTY end)
-  def("gethook", function(I, args) return R(nil) end)
+  def("sethook", function(I, args)
+    local idx = rt.is_thread(args[1]) and 2 or 1
+    local fn = args[idx]
+    if fn == nil then
+      I.hook = nil
+      return EMPTY
+    end
+    local mask = args[idx + 1]
+    if type(mask) ~= "string" then mask = "" end
+    local count = opt_int(I, args, idx + 2, "sethook", 0)
+    I.hook = {
+      fn = fn,
+      call = mask:find("c", 1, true) ~= nil,
+      ret = mask:find("r", 1, true) ~= nil,
+      line = mask:find("l", 1, true) ~= nil,
+      count = (count > 0) and count or nil,
+      mask = mask,
+    }
+    I.hookcount = I.hook.count or 0
+    return EMPTY
+  end)
+  def("gethook", function(I, args)
+    if I.hook == nil then return R(nil) end
+    local m = ""
+    if I.hook.call then m = m .. "c" end
+    if I.hook.ret then m = m .. "r" end
+    if I.hook.line then m = m .. "l" end
+    return R(I.hook.fn, m, I.hook.count or 0)
+  end)
   def("getregistry", function(I, args)
     I.registry = I.registry or rt.new_table()
     return R(I.registry)

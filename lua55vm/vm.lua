@@ -227,6 +227,18 @@ end
 
 local OP  -- forward declaration of dispatch handlers
 
+-- fire a debug hook event ("call"/"return"/"line"/"count"/"tail call").
+-- The hook is disabled while it runs to avoid recursion.
+function Interp:fire_hook(event, line)
+  local hook = self.hook
+  if hook == nil or self.in_hook then return end
+  self.in_hook = true
+  local ok, err = pcall(self.call, self, hook.fn,
+    { event, line, n = (line ~= nil) and 2 or 1 })
+  self.in_hook = false
+  if not ok then error(err, 0) end
+end
+
 function Interp:run_closure(cl, args)
   local proto = cl.proto
   self.depth = self.depth + 1
@@ -252,9 +264,11 @@ function Interp:run_closure(cl, args)
   }
   self.frames[#self.frames + 1] = frame
 
+  if self.hook and self.hook.call then self:fire_hook("call") end
   -- exec_loop may raise (propagating to a guest pcall boundary, which restores
   -- the frame stack and depth).  On normal return we pop here.
   local result = self:exec_loop(frame)
+  if self.hook and self.hook.ret then self:fire_hook("return") end
   self.frames[#self.frames] = nil
   self.depth = self.depth - 1
   return result
@@ -307,10 +321,25 @@ function Interp:exec_loop(frame)
   local K = proto.consts
   local cl = frame.cl
   local pc = 1
+  local lastline, lastpc = -1, 0
 
   while true do
     local ins = code[pc]
     frame.savedpc = pc
+    -- debug hooks (count / line)
+    local hk = self.hook
+    if hk and not self.in_hook then
+      if hk.count then
+        self.hookcount = self.hookcount - 1
+        if self.hookcount <= 0 then self.hookcount = hk.count; self:fire_hook("count") end
+      end
+      if hk.line then
+        local line = proto.lines[pc]
+        if line ~= lastline or pc <= lastpc then self:fire_hook("line", line) end
+        lastline = line
+      end
+      lastpc = pc
+    end
     pc = pc + 1
     local op = ins.op
     local a = ins.a

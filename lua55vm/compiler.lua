@@ -1023,7 +1023,7 @@ function Compiler.compile_function(parent_fs, node)
   for _, s in ipairs(node.body.stmts) do compile_stmt(fs, s) end
   -- implicit return
   fs:leave_block()
-  fs:emit("RETURN", 0, 1, nil, node.line)
+  fs:emit("RETURN", 0, 1, nil, node.endline or node.line)  -- final return on 'end' line
 
   Compiler.resolve_gotos(fs)
 

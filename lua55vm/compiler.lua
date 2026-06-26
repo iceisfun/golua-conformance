@@ -76,15 +76,30 @@ function FS:K(value)
   return idx
 end
 
+-- the register file is limited to 255 slots, like reference Lua
+function FS:reglimit()
+  if self.proto.maxstack > 255 then
+    local where = self.is_main and "main function"
+      or string.format("function <%s:%d>", self.proto.source, self.proto.line or 0)
+    error(string.format("%s:%d: too many registers (limit is 255) in %s near %s",
+      self.proto.source, self.cur_near_line or self.curline or 0, where,
+      self.cur_near or "'?'"), 0)
+  end
+end
+
 function FS:reserve(n)
   self.freereg = self.freereg + n
   if self.freereg > self.proto.maxstack then
     self.proto.maxstack = self.freereg
+    self:reglimit()
   end
 end
 
 function FS:checkstack(reg)
-  if reg + 1 > self.proto.maxstack then self.proto.maxstack = reg + 1 end
+  if reg + 1 > self.proto.maxstack then
+    self.proto.maxstack = reg + 1
+    self:reglimit()
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -632,6 +647,8 @@ function adjust_explist(fs, exprs, base, nvars)
 end
 
 local function compile_local(fs, node)
+  fs.cur_near = node._near
+  fs.cur_near_line = node._near_line
   local base = fs.freereg
   local nvars = #node.names
   adjust_explist(fs, node.exprs, base, nvars)

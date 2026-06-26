@@ -831,9 +831,11 @@ local function install_os(I)
   h["date"] = function(I, args)
     local fmt = args[1]
     if fmt == nil then return R(os.date()) end
-    local t = args[2]
-    if t ~= nil then return R(os.date(check_str(I, args, 1, "date"), rt.toint(t))) end
-    return R(os.date(check_str(I, args, 1, "date")))
+    fmt = check_str(I, args, 1, "date")
+    if args[2] ~= nil then
+      return R(os.date(fmt, check_int(I, args, 2, "date")))
+    end
+    return R(os.date(fmt))
   end
   h["getenv"] = function(I, args) return R(os.getenv(check_str(I, args, 1, "getenv"))) end
   h["difftime"] = function(I, args)

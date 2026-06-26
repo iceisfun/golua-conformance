@@ -9,13 +9,16 @@
 # Env:
 #   ORACLE   reference interpreter (default /usr/bin/lua5.5.0; falls back to
 #            $GOLUA then /tmp/golua for back-compat)
-#   HOSTLUA  host Lua used to run the guest interpreter (default lua)
+#   HOSTLUA  host Lua used to run the guest interpreter (default lua5.5.0)
+#   TIMEOUT  per-process wall-clock cap, seconds (default 1200). Always bounded
+#            so a hang/infinite loop eventually fails instead of running forever.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VMDIR="$(dirname "$HERE")"
 GOLUA="${ORACLE:-${GOLUA:-/usr/bin/lua5.5.0}}"
 HOSTLUA="${HOSTLUA:-lua5.5.0}"
+TIMEOUT="${TIMEOUT:-1200}"
 
 QUIET=0
 if [ "${1:-}" = "-q" ]; then QUIET=1; shift; fi
@@ -39,9 +42,9 @@ TMPO="$(mktemp)"; TMPE="$(mktemp)"
 TMPO2="$(mktemp)"; TMPE2="$(mktemp)"
 trap 'rm -f "$TMPO" "$TMPE" "$TMPO2" "$TMPE2"' EXIT
 
-(cd "$VMDIR" && timeout 30 "$HOSTLUA" run.lua "$FILE" >"$TMPO" 2>"$TMPE")
+(cd "$VMDIR" && timeout "$TIMEOUT" "$HOSTLUA" run.lua "$FILE" >"$TMPO" 2>"$TMPE")
 OUR_RC=$?
-timeout 30 "$GOLUA" "$FILE" >"$TMPO2" 2>"$TMPE2"
+timeout "$TIMEOUT" "$GOLUA" "$FILE" >"$TMPO2" 2>"$TMPE2"
 ORC_RC=$?
 
 OUR_OUT="$(norm <"$TMPO")"

@@ -57,8 +57,13 @@ function Interp:find_upval(frame, reg)
   return uv
 end
 
--- close open upvalues and run to-be-closed handlers for registers >= level
+-- Close open upvalues and run to-be-closed handlers for registers >= level, in
+-- reverse declaration order. A pending error (from the triggering error or from
+-- an earlier __close) is passed as the 2nd argument to each handler and chains:
+-- if a handler raises, that becomes the new pending error. Returns the final
+-- pending error (or nil); callers re-raise it.
 function Interp:close_upvals(frame, level, errobj)
+  local pending = errobj
   if frame.tbc and #frame.tbc > 0 then
     for i = #frame.tbc, 1, -1 do
       local reg = frame.tbc[i]
@@ -68,18 +73,21 @@ function Interp:close_upvals(frame, level, errobj)
         if val ~= nil and val ~= false then
           local h = self:metamethod(val, "__close")
           if h == nil then
-            self:rt_error("attempt to call a nil value (metamethod 'close')")
-          end
-          if errobj ~= nil then
-            -- error close: __close(value, errobj)
-            local ev = errobj
-            if type(ev) == "table" and getmetatable(ev) == self.GUEST_ERR_MT then
-              ev = ev.value
-            end
-            self:call(h, { val, ev, n = 2 })
+            pending = setmetatable({ value = self:where() ..
+              "attempt to call a nil value (metamethod 'close')" }, self.GUEST_ERR_MT)
           else
-            -- normal close: __close(value)
-            self:call(h, { val, n = 1 })
+            local args
+            if pending ~= nil then
+              local ev = pending
+              if type(ev) == "table" and getmetatable(ev) == self.GUEST_ERR_MT then
+                ev = ev.value
+              end
+              args = { val, ev, n = 2 }       -- error close: __close(value, err)
+            else
+              args = { val, n = 1 }           -- normal close: __close(value)
+            end
+            local ok, err = pcall(self.call, self, h, args)
+            if not ok then pending = err end
           end
         end
       end
@@ -94,6 +102,7 @@ function Interp:close_upvals(frame, level, errobj)
       openuv[reg] = nil
     end
   end
+  return pending
 end
 
 -- ---------------------------------------------------------------------------
@@ -493,7 +502,8 @@ function Interp:exec_loop(frame)
       local nargs = (b == 0) and (frame.top - a - 1) or (b - 1)
       local cargs = { n = nargs }
       for i = 1, nargs do cargs[i] = R[a + i] end
-      self:close_upvals(frame, 0)
+      local _ce = self:close_upvals(frame, 0)
+      if _ce ~= nil then error(_ce, 0) end
       if rt.is_closure(fn) then
         -- reuse this frame: true tail call (no stack growth)
         local p = fn.proto
@@ -520,7 +530,8 @@ function Interp:exec_loop(frame)
       local nret = (b == 0) and (frame.top - a) or (b - 1)
       local res = { n = nret }
       for i = 1, nret do res[i] = R[a + i - 1] end
-      self:close_upvals(frame, 0)
+      local _ce = self:close_upvals(frame, 0)
+      if _ce ~= nil then error(_ce, 0) end
       return res
     elseif op == "VARARG" then
       local va = frame.varargs
@@ -635,7 +646,8 @@ function Interp:exec_loop(frame)
         pc = ins.b
       end
     elseif op == "CLOSE" then
-      self:close_upvals(frame, a)
+      local _ce = self:close_upvals(frame, a)
+      if _ce ~= nil then error(_ce, 0) end
     elseif op == "TBC" then
       local v = R[a]
       if v ~= nil and v ~= false and self:metamethod(v, "__close") == nil then
@@ -704,7 +716,7 @@ function Interp:protected(fn, args)
     self.frames[top] = nil
     if f and f.tbc and #f.tbc > 0 then
       local cok, cerr = pcall(self.close_upvals, self, f, 0, res)
-      if not cok then res = cerr end
+      if cok then res = cerr else res = cerr end   -- chained close error or raise
     end
   end
   self.depth = saved_depth

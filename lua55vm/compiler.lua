@@ -1048,8 +1048,12 @@ end
 function Compiler.resolve_gotos(fs)
   for _, g in ipairs(fs.pending_gotos) do
     if not g.done then
-      error(string.format("%s:%d: no visible label '%s' for <goto>",
-        fs.proto.source, g.line or 0, g.name), 0)
+      if g.name == "break" then
+        error(string.format("%s:%d: break outside a loop at line %d",
+          fs.proto.source, g.line or 0, g.line or 0), 0)
+      end
+      error(string.format("%s:%d: no visible label '%s' for <goto> at line %d",
+        fs.proto.source, g.line or 0, g.name, g.line or 0), 0)
     end
   end
 end

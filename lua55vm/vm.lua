@@ -200,7 +200,11 @@ function Interp:reg_name(cl, pc, reg)
       return nil
     elseif op == "GETFIELD" and ins.a == reg then
       local key = proto.consts[ins.c]
-      if type(key) == "string" then return "field", key end
+      if type(key) == "string" then
+        -- like Lua's gxf: indexing a variable named '_ENV' is a global access
+        if local_name(proto, ins.b, i) == "_ENV" then return "global", key end
+        return "field", key
+      end
       return nil
     elseif op == "GETUPVAL" and ins.a == reg then
       local u = proto.upvals[ins.b]
@@ -409,6 +413,17 @@ local function clamp_for_limit(limit, step)
   end
 end
 
+-- type name for error messages: the __name metafield if present, else the
+-- basic type (like Lua's luaT_objtypename)
+function Interp:objtypename(v)
+  local mt = self:getmeta(v)
+  if mt then
+    local nm = mt.hash["__name"]
+    if type(nm) == "string" then return nm end
+  end
+  return rt.typename(v)
+end
+
 -- coerce a numeric-for control value. Lua 5.5 coerces numeric strings, and a
 -- string operand is taken as a float (so such loops iterate in float).
 function Interp:forprep_num(v, what)
@@ -418,7 +433,7 @@ function Interp:forprep_num(v, what)
     if n ~= nil then return n + 0.0 end
   end
   self:rt_error("bad 'for' " .. what .. " (number expected, got "
-    .. rt.typename(v) .. ")")
+    .. self:objtypename(v) .. ")")
 end
 
 function Interp:exec_loop(frame)

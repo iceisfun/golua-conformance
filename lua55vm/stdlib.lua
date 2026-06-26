@@ -54,13 +54,14 @@ local function argerror(I, n, fname, extra)
 end
 
 -- got-description: "no value" if the argument is absent, else its type name
-local function gotname(args, n)
+-- (using the __name metafield, like Lua's luaL_typeerror via luaL_typename)
+local function gotname(I, args, n)
   if n > args.n then return "no value" end
-  return rt.typename(args[n])
+  return I:objtypename(args[n])
 end
 
 local function typeerror(I, n, fname, expected, args)
-  argerror(I, n, fname, hostfmt("%s expected, got %s", expected, gotname(args, n)))
+  argerror(I, n, fname, hostfmt("%s expected, got %s", expected, gotname(I, args, n)))
 end
 
 local function check_table(I, args, n, fname)

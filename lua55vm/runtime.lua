@@ -499,7 +499,7 @@ function M.install(Interp)
       local bad
       if type(a) ~= "number" then bad = a else bad = b end
       self:rt_error("attempt to perform bitwise operation on a "
-        .. M.typename(bad) .. " value" .. self:hint_for(bad))
+        .. self:objtypename(bad) .. " value" .. self:hint_for(bad))
     else
       local bad
       if tonum(a) == nil then bad = a else bad = b end
@@ -508,7 +508,7 @@ function M.install(Interp)
           ARITH_OPNAME[op], M.typename(a), M.typename(b)))
       end
       self:rt_error("attempt to perform arithmetic on a "
-        .. M.typename(bad) .. " value" .. self:hint_for(bad))
+        .. self:objtypename(bad) .. " value" .. self:hint_for(bad))
     end
   end
 
@@ -520,7 +520,7 @@ function M.install(Interp)
     if type(a) == "string" then
       self:rt_error("attempt to unm a 'string' with a 'string'")
     end
-    self:rt_error("attempt to perform arithmetic on a " .. M.typename(a)
+    self:rt_error("attempt to perform arithmetic on a " .. self:objtypename(a)
       .. " value" .. self:hint_for(a))
   end
 
@@ -530,7 +530,7 @@ function M.install(Interp)
     local h = self:metamethod(a, "__bnot")
     if h ~= nil then return (self:call(h, { a, a, n = 2 }))[1] end
     if type(a) == "number" then self:rt_error("number has no integer representation") end
-    self:rt_error("attempt to perform bitwise operation on a " .. M.typename(a)
+    self:rt_error("attempt to perform bitwise operation on a " .. self:objtypename(a)
       .. " value" .. self:hint_for(a))
   end
 
@@ -616,7 +616,7 @@ function M.install(Interp)
   end
 
   function Interp:cmp_error(a, b)
-    local ta, tb = M.typename(a), M.typename(b)
+    local ta, tb = self:objtypename(a), self:objtypename(b)
     if ta == tb then
       self:rt_error("attempt to compare two " .. ta .. " values")
     else

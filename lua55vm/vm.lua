@@ -108,8 +108,20 @@ function Interp:close_upvals(frame, level, errobj)
             for j = #self.frames, base_n + 1, -1 do self.frames[j] = nil end
             self.depth = base_d
             self.next_callinfo = { what = "metamethod", name = "close" }
+            local saved_n = #self.frames
             local ok, err = pcall(self.call, self, h, args)
-            if not ok then pending = err end
+            if not ok then
+              -- the __close raised; run the to-be-closed vars of any frames it
+              -- left on the stack (its own nested closes), chaining the error
+              for j = #self.frames, saved_n + 1, -1 do
+                local fr = self.frames[j]
+                if fr and not fr.native and fr.tbc and #fr.tbc > 0 then
+                  local ce = self:close_upvals(fr, 0, err)
+                  if ce ~= nil then err = ce end
+                end
+              end
+              pending = err
+            end
           end
         end
       end

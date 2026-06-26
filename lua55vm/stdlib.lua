@@ -277,7 +277,7 @@ local function install_base(I)
     local h = I:metamethod(t, "__pairs")
     if h ~= nil then
       local res = I:call(h, { t, n = 1 })
-      return R(res[1], res[2], res[3])
+      return R(res[1], res[2], res[3], res[4])   -- incl. to-be-closed value
     end
     -- no validation here: pairs(non-table) succeeds; next() errors when iterated
     return R(G.hash["next"], t, nil)

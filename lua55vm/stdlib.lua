@@ -1402,6 +1402,9 @@ local function install_coroutine(I)
     local th = args[1]
     if args.n == 0 then th = I.current_thread or I.main_thread end
     if not rt.is_thread(th) then typeerror(I, 1, "close", "thread", args) end
+    -- a re-entrant close (a __close handler closing its own coroutine while it
+    -- is already being closed) is a no-op success, like closing a dead thread
+    if th.closing then return R(true) end
     -- determine status: a thread is "running" if it's the current execution
     -- context, "normal" if it has resumed another, else suspended/dead
     local status
@@ -1420,20 +1423,34 @@ local function install_coroutine(I)
     -- run the coroutine's pending to-be-closed handlers (inner frames first),
     -- in the coroutine's own context, then dispose of the host coroutine.
     local closeerr
+    th.closing = true
     if th.frames and #th.frames > 0 then
       local saved = I.current_thread
       I.current_thread = th
+      -- __close handlers run via self:call, which pushes onto the MAIN frame
+      -- stack; if a handler errors those frames are left behind. Remember the
+      -- depth so we can truncate back to it and not leak dead frames into
+      -- later error locations / tracebacks.
+      local base_n = #I.frames
       for i = #th.frames, 1, -1 do
         local fr = th.frames[i]
         if fr.tbc and #fr.tbc > 0 then
+          -- close_upvals RETURNS the pending error (chained through __close),
+          -- it does not raise it; capture that too, not just a pcall failure
           local ok, e = pcall(I.close_upvals, I, fr, 0, closeerr)
-          if not ok then closeerr = e end
+          if ok then
+            if e ~= nil then closeerr = e end
+          else
+            closeerr = e
+          end
+          for j = #I.frames, base_n + 1, -1 do I.frames[j] = nil end
         end
       end
       I.current_thread = saved
       th.frames = {}
     end
     coroutine.close(th.co)
+    th.closing = nil
     -- the error that killed the coroutine (if any) takes precedence
     local err = closeerr
     if type(err) == "table" and getmetatable(err) == I.GUEST_ERR_MT then

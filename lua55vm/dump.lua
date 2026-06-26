@@ -120,7 +120,9 @@ local function dec_proto(s, pos, psource)
   p.numparams = np; p.maxstack = maxstack; p.is_vararg = (va == 1)
   p.line, pos = sunpack("<i4", s, pos)
   p.source, pos = sunpack("<s4", s, pos)
-  if p.source == "" then p.source = psource end   -- inherit parent's source
+  -- inherit the parent's source for a nested proto that shares it; a top-level
+  -- "" source (e.g. stripped) stays "" rather than becoming nil
+  if p.source == "" and psource ~= nil then p.source = psource end
   p.chunkname, pos = sunpack("<s4", s, pos)
   if p.chunkname == "" then p.chunkname = nil end
 

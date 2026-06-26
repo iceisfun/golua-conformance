@@ -796,7 +796,7 @@ local function compile_numfor(fs, node)
   local prep = fs:emit("FORPREP", base, 0, nil, node.line)
   local b = fs:enter_block(true)
   fs:reserve(1)
-  fs:new_local(node.name, base + 3, nil)
+  fs:new_local(node.name, base + 3, "const")  -- Lua 5.5: control var is read-only
   local loopstart = fs:here()
   compile_block(fs, node.body)
   fs:leave_block()

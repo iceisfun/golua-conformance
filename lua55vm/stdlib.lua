@@ -673,10 +673,16 @@ local function install_table(I)
   G.hash["table"] = lib
   local function def(name, fn) lib.hash[name] = fn end
 
-  -- table functions access elements through metamethods (lua_geti/seti/luaL_len)
+  -- table functions access elements through metamethods (lua_geti/seti/luaL_len);
+  -- the length (aux_getn) must be an integer.
   local function rget(t, k) return I:index(t, k) end
   local function rset(t, k, v) I:setindex(t, k, v) end
-  local function rgetn(t) return I:len(t) end
+  local function rgetn(t)
+    local n = I:len(t)
+    local i = rt.toint(n)
+    if i == nil then I:rt_error("object length is not an integer") end
+    return i
+  end
 
   def("insert", function(I, args)
     local t = check_table(I, args, 1, "insert")

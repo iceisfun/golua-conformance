@@ -1299,8 +1299,21 @@ local function install_coroutine(I)
     local th = args[1]
     if args.n == 0 then th = I.current_thread or I.main_thread end
     if not rt.is_thread(th) then typeerror(I, 1, "close", "thread", args) end
-    if th.main then I:rt_error("cannot close main thread") end
-    if th == I.current_thread then I:rt_error("cannot close a running coroutine") end
+    -- determine status: a thread is "running" if it's the current execution
+    -- context, "normal" if it has resumed another, else suspended/dead
+    local status
+    if th.main then
+      status = (I.current_thread == nil) and "running" or "normal"
+    elseif th == I.current_thread then
+      status = "running"
+    else
+      status = coroutine.status(th.co)
+    end
+    if status == "running" then
+      I:rt_error(th.main and "cannot close main thread" or "cannot close a running coroutine")
+    elseif status == "normal" then
+      I:rt_error("cannot close a normal coroutine")
+    end
     -- run the coroutine's pending to-be-closed handlers (inner frames first),
     -- in the coroutine's own context, then dispose of the host coroutine.
     local closeerr
@@ -1378,6 +1391,11 @@ local function install_debug(I)
     if rt.is_thread(args[1]) then idx = 2 end
     local f = args[idx]
     local what = args[idx + 1] or "nSltu"
+    for i = 1, #what do
+      if not ("nSltufLr"):find(what:sub(i, i), 1, true) then
+        argerror(I, idx + 1, "getinfo", "invalid option")
+      end
+    end
     local info = rt.new_table()
     local h = info.hash
     if type(f) == "number" then

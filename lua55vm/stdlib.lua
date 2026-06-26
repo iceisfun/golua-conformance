@@ -171,7 +171,8 @@ local function install_base(I)
   def("rawlen", function(I, args)
     local v = args[1]
     if type(v) == "string" then return R(#v) end
-    if rt.is_table(v) then return R(rt.getn(v)) end
+    -- file objects are modeled as tables but are FILE* userdata to Lua
+    if rt.is_table(v) and not v.is_userdata then return R(rt.getn(v)) end
     argerror(I, 1, "rawlen", "table or string expected")
   end)
 
@@ -1098,6 +1099,7 @@ local function install_io(I)
   local function wrap_file(hostf)
     local fobj = rt.new_table()
     fobj.meta = file_meta
+    fobj.is_userdata = true   -- modeled as a table, but a FILE* userdata to Lua
     fobj.hash.__file = hostf
     return fobj
   end
@@ -1648,7 +1650,11 @@ local function install_debug(I)
       local got = (args.n < 2) and "no value" or rt.typename(mt)
       argerror(I, 2, "setmetatable", "nil or table expected, got " .. got)
     end
-    if rt.is_table(t) then t.meta = mt end
+    -- debug.setmetatable sets the shared metatable for the value's whole TYPE
+    -- (basic types included), unlike the base setmetatable (tables only)
+    if rt.is_table(t) then t.meta = mt
+    elseif type(t) == "string" then I.string_meta = mt
+    else I.type_meta[rt.typename(t)] = mt end
     return R(t)
   end)
 

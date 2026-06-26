@@ -366,65 +366,70 @@ function M.install(Interp)
 
   ------------------------------------------------------------------ indexing
 
+  -- maximum __index/__newindex delegation chain length (Lua's MAXTAGLOOP)
+  local MAXTAGLOOP = 2000
+
   function Interp:index(t, k)
-    if M.is_table(t) then
-      local v = M.rawget(t, normalize_key(k))
-      if v ~= nil then return v end
-      local mt = t.meta
-      if mt == nil then return nil end
-      local h = mt.hash["__index"]
-      if h == nil then return nil end
-      if M.is_callable(h) then
-        return (self:call(h, { t, k, n = 2 }))[1]
+    for _ = 1, MAXTAGLOOP do
+      if M.is_table(t) then
+        local v = M.rawget(t, normalize_key(k))
+        if v ~= nil then return v end
+        local mt = t.meta
+        if mt == nil then return nil end
+        local h = mt.hash["__index"]
+        if h == nil then return nil end
+        if M.is_callable(h) then return (self:call(h, { t, k, n = 2 }))[1] end
+        t = h   -- delegate to the __index table
+      else
+        -- non-table: must have __index or it's an error
+        local h = self:metamethod(t, "__index")
+        if h == nil then
+          self:rt_error("attempt to index a " .. M.typename(t) .. " value")
+        end
+        if M.is_callable(h) then return (self:call(h, { t, k, n = 2 }))[1] end
+        t = h
       end
-      return self:index(h, k)
-    else
-      -- non-table: must have __index or it's an error
-      local h = self:metamethod(t, "__index")
-      if h == nil then
-        self:rt_error("attempt to index a " .. M.typename(t) .. " value")
-      end
-      if M.is_callable(h) then
-        return (self:call(h, { t, k, n = 2 }))[1]
-      end
-      return self:index(h, k)
     end
+    self:rt_error("'__index' chain too long; possible loop")
   end
 
   function Interp:setindex(t, k, v)
-    if M.is_table(t) then
-      local nk = normalize_key(k)
-      if M.rawget(t, nk) ~= nil then
-        M.rawset(t, nk, v)
-        return
-      end
-      local mt = t.meta
-      local h = mt and mt.hash["__newindex"]
-      if h == nil then
-        -- raw set; validate key
-        if nk == nil then self:rt_error("table index is nil") end
-        if type(nk) == "number" and nk ~= nk then
-          self:rt_error("table index is NaN")
+    for _ = 1, MAXTAGLOOP do
+      if M.is_table(t) then
+        local nk = normalize_key(k)
+        if M.rawget(t, nk) ~= nil then
+          M.rawset(t, nk, v)
+          return
         end
-        M.rawset(t, nk, v)
-        return
+        local mt = t.meta
+        local h = mt and mt.hash["__newindex"]
+        if h == nil then
+          -- raw set; validate key
+          if nk == nil then self:rt_error("table index is nil") end
+          if type(nk) == "number" and nk ~= nk then
+            self:rt_error("table index is NaN")
+          end
+          M.rawset(t, nk, v)
+          return
+        end
+        if M.is_callable(h) then
+          self:call(h, { t, k, v, n = 3 })
+          return
+        end
+        t = h   -- delegate to the __newindex table
+      else
+        local h = self:metamethod(t, "__newindex")
+        if h == nil then
+          self:rt_error("attempt to index a " .. M.typename(t) .. " value")
+        end
+        if M.is_callable(h) then
+          self:call(h, { t, k, v, n = 3 })
+          return
+        end
+        t = h
       end
-      if M.is_callable(h) then
-        self:call(h, { t, k, v, n = 3 })
-        return
-      end
-      self:setindex(h, k, v)
-    else
-      local h = self:metamethod(t, "__newindex")
-      if h == nil then
-        self:rt_error("attempt to index a " .. M.typename(t) .. " value")
-      end
-      if M.is_callable(h) then
-        self:call(h, { t, k, v, n = 3 })
-        return
-      end
-      self:setindex(h, k, v)
     end
+    self:rt_error("'__newindex' chain too long; possible loop")
   end
 
   ------------------------------------------------------------------ arithmetic
@@ -546,11 +551,11 @@ function M.install(Interp)
     if M.is_table(v) then
       local mt = v.meta
       local h = mt and mt.hash["__len"]
-      if h ~= nil then return (self:call(h, { v, n = 1 }))[1] end
+      if h ~= nil then return (self:call(h, { v, v, n = 2 }))[1] end
       return M.getn(v)
     end
     local h = self:metamethod(v, "__len")
-    if h ~= nil then return (self:call(h, { v, n = 1 }))[1] end
+    if h ~= nil then return (self:call(h, { v, v, n = 2 }))[1] end
     self:rt_error("attempt to get length of a " .. M.typename(v) .. " value"
       .. self:hint_for(v))
   end

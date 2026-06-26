@@ -96,14 +96,16 @@ local function frame_loc(frame)
   return string.format("%s:%d: ", frame.proto.source, line)
 end
 
--- location of the nearest guest frame from the top (runtime / argument errors)
+-- location for a runtime/library error. If the running frame is a native
+-- function (luaL_error style), report its caller (level 1); otherwise the
+-- error came from a VM op, so report the current guest frame.
 function Interp:where()
   local frames = self.frames
-  for i = #frames, 1, -1 do
-    local f = frames[i]
-    if f.proto and not f.native then return frame_loc(f) end
+  local top = frames[#frames]
+  if top and top.native then
+    return frame_loc(frames[#frames - 1])
   end
-  return ""
+  return frame_loc(top)
 end
 
 -- location at an explicit level (for error()): the currently running built-in

@@ -431,64 +431,103 @@ local function install_string(I)
     return R(res)
   end)
 
-  -- pattern-matching functions delegate to the host string library, wrapping
-  -- guest callables/tables for gsub.
+  -- pattern matching uses our own engine (strmatch), not the host's.
+  local strmatch = require("strmatch")
+
   def("find", function(I, args)
     local s = check_str(I, args, 1, "find")
     local p = check_str(I, args, 2, "find")
     local init = opt_int(I, args, 3, "find", 1)
     local plain = rt.truthy(args[4])
-    return R(string.find(s, p, init, plain))
+    return strmatch.find(I, s, p, init, plain)
   end)
 
   def("match", function(I, args)
     local s = check_str(I, args, 1, "match")
     local p = check_str(I, args, 2, "match")
     local init = opt_int(I, args, 3, "match", 1)
-    return R(string.match(s, p, init))
+    return strmatch.match(I, s, p, init)
   end)
 
   def("gmatch", function(I, args)
     local s = check_str(I, args, 1, "gmatch")
     local p = check_str(I, args, 2, "gmatch")
-    local it = string.gmatch(s, p)
-    -- iterator is a host function returning host values
+    local init = opt_int(I, args, 3, "gmatch", 1)
+    local it = strmatch.gmatch(I, s, p, init)
     return R(function(I2, a2)
-      return R(it())
+      local caps = it()
+      if caps == nil then return R(nil) end
+      return caps
     end)
   end)
+
+  -- expand a %0/%1.. replacement template, fetching captures lazily via getcap
+  local function expand_template(I, tmpl, whole, getcap)
+    local out = {}
+    local i, n = 1, #tmpl
+    while i <= n do
+      local c = tmpl:sub(i, i)
+      if c == "%" then
+        local d = tmpl:sub(i + 1, i + 1)
+        if d == "%" then out[#out + 1] = "%"
+        elseif d == "0" then out[#out + 1] = whole
+        elseif d:match("%d") then
+          local cv = getcap(tonumber(d))
+          out[#out + 1] = (type(cv) == "number") and I:number_tostring(cv) or cv
+        else
+          I:rt_error("invalid use of '%' in replacement string")
+        end
+        i = i + 2
+      else
+        out[#out + 1] = c
+        i = i + 1
+      end
+    end
+    return table.concat(out)
+  end
 
   def("gsub", function(I, args)
     local s = check_str(I, args, 1, "gsub")
     local p = check_str(I, args, 2, "gsub")
     local repl = args[3]
-    local n = args[4]
-    local hostrepl
-    if type(repl) == "string" or type(repl) == "number" then
-      hostrepl = repl
+    -- validate repl type, distinguishing "no value" from nil
+    local rtp = type(repl)
+    if not (rtp == "string" or rtp == "number" or rt.is_table(repl)
+            or rt.is_callable(repl)) then
+      typeerror(I, 3, "gsub", "string/function/table", args)
+    end
+    local maxn = nil
+    if args[4] ~= nil then maxn = check_int(I, args, 4, "gsub") end
+
+    local replfn
+    if rtp == "string" or rtp == "number" then
+      local tmpl = (rtp == "number") and I:number_tostring(repl) or repl
+      replfn = function(whole, getcap, ncaps)
+        return expand_template(I, tmpl, whole, getcap)
+      end
     elseif rt.is_table(repl) then
-      hostrepl = function(...)
-        local cap = ...
-        local v = I:index(repl, cap)
+      replfn = function(whole, getcap, ncaps)
+        local v = I:index(repl, getcap(1))
         if v == nil or v == false then return nil end
-        return v
-      end
-    elseif rt.is_callable(repl) then
-      hostrepl = function(...)
-        local r = I:call(repl, pack(...))
-        local v = r[1]
-        if v == nil or v == false then return nil end
-        return v
+        if type(v) ~= "string" and type(v) ~= "number" then
+          I:rt_error("invalid replacement value (a " .. rt.typename(v) .. ")")
+        end
+        return (type(v) == "number") and I:number_tostring(v) or v
       end
     else
-      argerror(I, 3, "gsub", "string/function/table expected")
+      replfn = function(whole, getcap, ncaps)
+        local cargs = { n = ncaps }
+        for i = 1, ncaps do cargs[i] = getcap(i) end
+        local v = I:call(repl, cargs)[1]
+        if v == nil or v == false then return nil end
+        if type(v) ~= "string" and type(v) ~= "number" then
+          I:rt_error("invalid replacement value (a " .. rt.typename(v) .. ")")
+        end
+        return (type(v) == "number") and I:number_tostring(v) or v
+      end
     end
-    local out, cnt
-    if n ~= nil then
-      out, cnt = string.gsub(s, p, hostrepl, check_int(I, args, 4, "gsub"))
-    else
-      out, cnt = string.gsub(s, p, hostrepl)
-    end
+
+    local out, cnt = strmatch.gsub(I, s, p, replfn, maxn)
     return R(out, cnt)
   end)
 

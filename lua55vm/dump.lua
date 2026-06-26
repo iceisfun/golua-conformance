@@ -55,10 +55,14 @@ local function enc_proto(out, p, strip)
     out[#out + 1] = (c == nil) and spack("<B", 0) or spack("<Bi8", 1, c)
   end
 
-  -- line info
+  -- line info (omitted when stripping debug info)
   local lines = p.lines
-  out[#out + 1] = spack("<i4", #lines)
-  for i = 1, #lines do out[#out + 1] = spack("<i4", lines[i] or 0) end
+  if strip then
+    out[#out + 1] = spack("<i4", 0)
+  else
+    out[#out + 1] = spack("<i4", #lines)
+    for i = 1, #lines do out[#out + 1] = spack("<i4", lines[i] or 0) end
+  end
 
   -- upvalues
   local ups = p.upvals

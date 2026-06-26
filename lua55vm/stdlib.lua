@@ -1098,11 +1098,12 @@ local function install_coroutine(I)
       -- success: true, results...
       return rr
     else
-      -- error: unwrap guest error value
+      -- error: unwrap guest error value and remember it for coroutine.close
       local err = rr[2]
       if type(err) == "table" and getmetatable(err) == I.GUEST_ERR_MT then
         err = err.value
       end
+      th.resume_error = err
       return R(false, err)
     end
   end)
@@ -1118,6 +1119,7 @@ local function install_coroutine(I)
       return R(th == I.current_thread and "running" or
                (I.current_thread == nil and "running" or "normal"))
     end
+    if th == I.current_thread then return R("running") end
     return R(coroutine.status(th.co))
   end)
 
@@ -1141,12 +1143,34 @@ local function install_coroutine(I)
   def("close", function(I, args)
     local th = args[1]
     if not rt.is_thread(th) then typeerror(I, 1, "close", "thread", args) end
-    local ok, err = coroutine.close(th.co)
-    if ok then return R(true) end
+    if th.main then I:rt_error("cannot close a main thread") end
+    if th == I.current_thread then I:rt_error("cannot close a running coroutine") end
+    -- run the coroutine's pending to-be-closed handlers (inner frames first),
+    -- in the coroutine's own context, then dispose of the host coroutine.
+    local closeerr
+    if th.frames and #th.frames > 0 then
+      local saved = I.current_thread
+      I.current_thread = th
+      for i = #th.frames, 1, -1 do
+        local fr = th.frames[i]
+        if fr.tbc and #fr.tbc > 0 then
+          local ok, e = pcall(I.close_upvals, I, fr, 0, closeerr)
+          if not ok then closeerr = e end
+        end
+      end
+      I.current_thread = saved
+      th.frames = {}
+    end
+    coroutine.close(th.co)
+    -- the error that killed the coroutine (if any) takes precedence
+    local err = closeerr
     if type(err) == "table" and getmetatable(err) == I.GUEST_ERR_MT then
       err = err.value
     end
-    return R(false, err)
+    if err == nil then err = th.resume_error end
+    th.resume_error = nil
+    if err ~= nil then return R(false, err) end
+    return R(true)
   end)
 
   def("wrap", function(I, args)

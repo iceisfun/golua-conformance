@@ -20,8 +20,10 @@ local M = {}
 local getmt = getmetatable
 local TABLE_MT, CLOSURE_MT, THREAD_MT = rt.TABLE_MT, rt.CLOSURE_MT, rt.THREAD_MT
 
--- GC step size between automatic collections (rough bytes of new allocation)
-local GCSTEP = 100000
+-- GC step size between automatic collections (rough bytes of new allocation).
+-- Larger = fewer stop-the-world collections (our GC is not incremental), at the
+-- cost of running finalizers / clearing weak tables a bit later.
+local GCSTEP = 1000000
 
 function M.install(Interp)
 

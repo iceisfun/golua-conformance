@@ -381,6 +381,9 @@ function Interp:run_closure(cl, args)
   self.next_callinfo = nil
   self.frames[#self.frames + 1] = frame
 
+  -- function entry is a safe point: run a pending GC (covers call-heavy code
+  -- with little looping, complementing the loop back-edge check)
+  if self.gc and self.gc.due then self:gc_collect() end
   if self.hook and self.hook.call then self:fire_hook("call") end
   -- exec_loop may raise (propagating to a guest pcall boundary, which restores
   -- the frame stack and depth).  On normal return we pop here.
@@ -454,9 +457,6 @@ function Interp:exec_loop(frame)
   while true do
     local ins = code[pc]
     frame.savedpc = pc
-    -- automatic GC at a safe point (all live values are in marked registers)
-    local _gc = self.gc
-    if _gc and _gc.due then self:gc_collect() end
     -- debug hooks (count / line)
     local hk = self.hook
     if hk and not self.in_hook then
@@ -580,6 +580,12 @@ function Interp:exec_loop(frame)
       R[a] = self:le(R[ins.b], R[ins.c])
     elseif op == "JMP" then
       pc = a
+      -- backward jumps are loop back-edges: a safe point to run a pending GC
+      -- (so allocation-heavy loops still clear weak tables / run finalizers)
+      if a <= frame.savedpc then
+        local _gc = self.gc
+        if _gc and _gc.due then frame.savedpc = pc; self:gc_collect() end
+      end
     elseif op == "JMPIF" then
       if truthy(R[a]) then pc = ins.b end
     elseif op == "JMPIFNOT" then

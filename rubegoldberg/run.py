@@ -103,9 +103,12 @@ def render(prog):
     for i, (name, body) in enumerate(prog):
         out.append("-- stage %d: %s" % (i, name))
         out.append("do")
-        out.append("  local ok, r = pcall(function(x)")
+        # emit(tag, s): extra observations (e.g. formatted floats). Tagged with
+        # the stage index so a divergence localizes to this stage.
+        out.append("  local function emit(tag, s) out[#out+1] = '%d#' .. tag .. '=' .. s end" % i)
+        out.append("  local ok, r = pcall(function(x, emit)")
         out.append(body.rstrip("\n"))
-        out.append("  end, v)")
+        out.append("  end, v, emit)")
         out.append("  if ok and math.type(r) == 'integer' then v = r end")
         out.append("  obs(%d, %r, ok, r)" % (i, name))
         out.append("end")

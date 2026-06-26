@@ -417,6 +417,7 @@ function M.gsub(I, s, p, repl, maxn)
   local pstart = anchor and 2 or 1
   local out = {}
   local count = 0
+  local changed = false    -- whether any replacement actually differed
   local src = 1
   local lastmatch = nil    -- end of the previous (counted) match
   while not (maxn and count >= maxn) do
@@ -435,7 +436,12 @@ function M.gsub(I, s, p, repl, maxn)
         return ms:get_capture(i, src, mend)
       end
       local r = repl(whole, getcap, ncaps)
-      out[#out + 1] = (r == nil or r == false) and whole or r
+      if r == nil or r == false then
+        out[#out + 1] = whole        -- keep original text (no change)
+      else
+        out[#out + 1] = r
+        changed = true
+      end
       src = e
       lastmatch = e
     elseif src <= ls then
@@ -446,6 +452,9 @@ function M.gsub(I, s, p, repl, maxn)
     end
     if anchor then break end
   end
+  -- if nothing changed, return the original string object (Lua reuses it, so
+  -- string.format("%p", gsub(s,...)) == string.format("%p", s) -- see pm.lua)
+  if not changed then return s, count end
   if src <= ls then out[#out + 1] = sub(s, src, ls) end
   return table.concat(out), count
 end

@@ -1155,9 +1155,17 @@ local function install_io(I)
   end
 
   h["write"] = function(I, args)
-    local a = { default_out, n = args.n + 1 }
-    for i = 1, args.n do a[i + 1] = args[i] end
-    return I:call(file_methods.hash["write"], a)
+    -- inlined (not delegated through file:write) so io.write is a single C
+    -- frame: error location points at the guest caller and the name falls back
+    -- to 'io.write' via func_names when there's no call-site name.
+    local hostf = default_out.hash.__file
+    for i = 1, args.n do
+      local v = args[i]
+      if type(v) == "number" then hostf:write(I:number_tostring(v))
+      elseif type(v) == "string" then hostf:write(v)
+      else argerror(I, i, "write", "string expected, got " .. I:objtypename(v)) end
+    end
+    return R(default_out)
   end
 
   h["read"] = function(I, args)
@@ -1192,17 +1200,25 @@ local function install_io(I)
     return R("file")
   end
 
+  -- io.input/io.output: a string/number arg is a filename to open; any other
+  -- non-file argument is rejected as a bad FILE* (like Lua's g_iofile/tofile).
   h["output"] = function(I, args)
-    if args[1] ~= nil then
-      if is_file(args[1]) then default_out = args[1]
-      else default_out = wrap_file(assert(io.open(check_str(I, args, 1, "output"), "w"))) end
+    local a = args[1]
+    if a ~= nil then
+      if type(a) == "string" or type(a) == "number" then
+        default_out = wrap_file(assert(io.open(tostring(a), "w")))
+      elseif is_file(a) then default_out = a
+      else typeerror(I, 1, "output", "FILE*", args) end
     end
     return R(default_out)
   end
   h["input"] = function(I, args)
-    if args[1] ~= nil then
-      if is_file(args[1]) then default_in = args[1]
-      else default_in = wrap_file(assert(io.open(check_str(I, args, 1, "input"), "r"))) end
+    local a = args[1]
+    if a ~= nil then
+      if type(a) == "string" or type(a) == "number" then
+        default_in = wrap_file(assert(io.open(tostring(a), "r")))
+      elseif is_file(a) then default_in = a
+      else typeerror(I, 1, "input", "FILE*", args) end
     end
     return R(default_in)
   end

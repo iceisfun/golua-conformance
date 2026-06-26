@@ -41,6 +41,7 @@ local function new_funcstate(parent, source, chunkname)
     },
     constmap = {},
     actvars = {},      -- { {name, reg, attrib, captured} }  (in-scope stack)
+    ntbc = 0,          -- count of active to-be-closed vars (disables tail calls)
     freereg = 0,
     blocks = {},       -- scope stack
     upvalmap = {},     -- name -> upval index (1-based)
@@ -126,6 +127,7 @@ function FS:enter_block(is_loop)
     startpc = self:here(),
     is_loop = is_loop,
     has_capture = false,
+    saved_ntbc = self.ntbc,
     breaks = {},
   }
   self.blocks[#self.blocks + 1] = b
@@ -176,6 +178,7 @@ function FS:leave_block()
     if av.locvar then av.locvar.endpc = endpc end
   end
   self.freereg = b.firstreg
+  self.ntbc = b.saved_ntbc
   return b
 end
 
@@ -712,6 +715,15 @@ end
 local function compile_local(fs, node)
   fs.cur_near = node._near
   fs.cur_near_line = node._near_line
+  -- at most one to-be-closed variable per local declaration
+  local nclose = 0
+  for i = 1, #node.names do
+    if node.attribs[i] == "close" then nclose = nclose + 1 end
+  end
+  if nclose > 1 then
+    error(string.format("%s:%d: multiple to-be-closed variables in local list",
+      fs.proto.source, node.line or 0), 0)
+  end
   local base = fs.freereg
   local nvars = #node.names
   adjust_explist(fs, node.exprs, base, nvars)
@@ -721,6 +733,7 @@ local function compile_local(fs, node)
     if node.attribs[i] == "close" then
       fs:emit("TBC", base + i - 1)
       fs:mark_capture_at(base + i - 1)
+      fs.ntbc = fs.ntbc + 1
     end
   end
   fs.freereg = base + nvars
@@ -742,8 +755,10 @@ local function compile_return(fs, node)
     fs:emit("RETURN", base, 1, nil, node.line)   -- 0 values
     return
   end
-  -- `return f(args)` is a tail call
-  if #exprs == 1 and (exprs[1].tag == "Call" or exprs[1].tag == "MethodCall") then
+  -- `return f(args)` is a tail call — but NOT while to-be-closed variables are
+  -- active (the close must run after the call returns)
+  if #exprs == 1 and fs.ntbc == 0
+     and (exprs[1].tag == "Call" or exprs[1].tag == "MethodCall") then
     compile_call(fs, exprs[1], base, -1, true)
     fs:emit("RETURN", base, 0, nil, node.line)   -- fallback for native tail call
     fs.freereg = base
@@ -840,16 +855,19 @@ end
 
 local function compile_genfor(fs, node)
   local base = fs.freereg
-  -- base=f, base+1=state, base+2=control
-  adjust_explist(fs, node.exprs, base, 3)
-  fs:reserve(3)
-  fs.freereg = base + 3
+  -- base=f, base+1=state, base+2=control, base+3=closing (to-be-closed),
+  -- loop vars at base+4..
+  adjust_explist(fs, node.exprs, base, 4)
+  fs:reserve(4)
+  fs.freereg = base + 4
+  fs:emit("TBC", base + 3, nil, nil, node.line)   -- 4th value is to-be-closed
+  fs.ntbc = fs.ntbc + 1
   local nvars = #node.names
   local jprep = fs:emit("JMP", 0)        -- jump to TFORCALL
   local b = fs:enter_block(true)
   for i = 1, nvars do
     fs:reserve(1)
-    fs:new_local(node.names[i], base + 3 + (i - 1), nil)
+    fs:new_local(node.names[i], base + 4 + (i - 1), nil)
   end
   local loopstart = fs:here()
   compile_block(fs, node.body)
@@ -857,7 +875,11 @@ local function compile_genfor(fs, node)
   fs:setarg(jprep, "a", fs:here())
   fs:emit("TFORCALL", base, nil, nvars, node.line)
   fs:emit("TFORLOOP", base, loopstart, nil, node.line)
-  for _, pc in ipairs(b.breaks) do fs:setarg(pc, "a", fs:here()) end
+  -- loop exit (normal fall-through and breaks): close the 4th value
+  local exitpc = fs:here()
+  fs:emit("CLOSE", base + 3, nil, nil, node.line)
+  for _, pc in ipairs(b.breaks) do fs:setarg(pc, "a", exitpc) end
+  fs.ntbc = fs.ntbc - 1
   fs.freereg = base
 end
 

@@ -70,7 +70,17 @@ function Interp:close_upvals(frame, level, errobj)
           if h == nil then
             self:rt_error("attempt to call a nil value (metamethod 'close')")
           end
-          self:call(h, { val, (errobj and errobj.value), n = 2 })
+          if errobj ~= nil then
+            -- error close: __close(value, errobj)
+            local ev = errobj
+            if type(ev) == "table" and getmetatable(ev) == self.GUEST_ERR_MT then
+              ev = ev.value
+            end
+            self:call(h, { val, ev, n = 2 })
+          else
+            -- normal close: __close(value)
+            self:call(h, { val, n = 1 })
+          end
         end
       end
     end
@@ -618,10 +628,10 @@ function Interp:exec_loop(frame)
       local cargs = { n = 2, R[a + 1], R[a + 2] }
       local res = self:call(fn, cargs)
       local nvars = ins.c
-      for i = 1, nvars do R[a + 3 + i - 1] = res[i] end
+      for i = 1, nvars do R[a + 4 + i - 1] = res[i] end   -- vars at a+4 (a+3 = closing)
     elseif op == "TFORLOOP" then
-      if R[a + 3] ~= nil then
-        R[a + 2] = R[a + 3]
+      if R[a + 4] ~= nil then
+        R[a + 2] = R[a + 4]
         pc = ins.b
       end
     elseif op == "CLOSE" then

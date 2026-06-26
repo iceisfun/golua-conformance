@@ -1685,7 +1685,9 @@ local function install_utf8(I)
   end
   h["codes"] = function(I, args)
     local s = check_str(I, args, 1, "codes")
-    local it, st, ctrl = utf8.codes(s)
+    local it, st, ctrl
+    if args[2] ~= nil then it, st, ctrl = utf8.codes(s, rt.truthy(args[2]))
+    else it, st, ctrl = utf8.codes(s) end
     return R(function(I2, a2)
       local r = pack(pcall(it, st, a2[2]))
       if not r[1] then I2:rt_error((tostring(r[2]):gsub("^.-:%d+: ", ""))) end

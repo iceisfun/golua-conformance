@@ -67,9 +67,10 @@ function Interp:close_upvals(frame, level, errobj)
         local val = frame.R[reg]
         if val ~= nil and val ~= false then
           local h = self:metamethod(val, "__close")
-          if h then
-            self:call(h, { val, (errobj and errobj.value), n = 2 })
+          if h == nil then
+            self:rt_error("attempt to call a nil value (metamethod 'close')")
           end
+          self:call(h, { val, (errobj and errobj.value), n = 2 })
         end
       end
     end

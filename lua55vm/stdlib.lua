@@ -26,12 +26,29 @@ local EMPTY = { n = 0 }
 -- ---------------------------------------------------------------------------
 
 local function argerror(I, n, fname, extra)
-  -- prefer the canonical (library-qualified) name of the running native fn,
-  -- matching Lua's pushglobalfuncname lookup in package.loaded.
-  local frame = I.frames[#I.frames]
-  if frame and frame.native and frame.fn and I.func_names
-     and I.func_names[frame.fn] then
-    fname = I.func_names[frame.fn]
+  -- Name the function the way Lua's luaL_argerror does: first by how it was
+  -- called (the caller's call instruction -> getfuncname), then by a global
+  -- search in package.loaded, then the supplied fallback.
+  local frames = I.frames
+  local nat = frames[#frames]
+  local caller = frames[#frames - 1]
+  local named = false
+  if caller and caller.cl and not caller.native and caller.proto then
+    local ci = caller.proto.code[caller.savedpc]
+    if ci and (ci.op == "CALL" or ci.op == "TAILCALL") then
+      local kind, nm = I:reg_name(caller.cl, caller.savedpc, ci.a)
+      if nm then
+        if kind == "method" then n = n - 1 end   -- discount the self argument
+        fname = nm; named = true
+      end
+    end
+  end
+  if not named and nat and nat.native and nat.fn
+     and I.func_names and I.func_names[nat.fn] then
+    fname = I.func_names[nat.fn]
+  end
+  if n == 0 then
+    I:rt_error(hostfmt("calling '%s' on bad self (%s)", fname, extra))
   end
   I:rt_error(hostfmt("bad argument #%d to '%s' (%s)", n, fname, extra))
 end

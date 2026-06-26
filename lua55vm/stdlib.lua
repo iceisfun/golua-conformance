@@ -302,6 +302,10 @@ local function install_base(I)
     return R(inext, args[1], 0)
   end)
 
+  -- pairs calls __pairs with a yieldable continuation (lua_callk), so a yield
+  -- inside __pairs is allowed (unlike a non-yieldable callback such as gsub)
+  I.yieldable_natives[G.hash["pairs"]] = true
+
   I.gc_mode = "generational"   -- Lua 5.5 default
   def("collectgarbage", function(I, args)
     local opt = args[1] or "collect"

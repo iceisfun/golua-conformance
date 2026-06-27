@@ -285,6 +285,9 @@ function Interp:build_traceback(msg, level)
   out[#out + 1] = "stack traceback:"
   local frames = self.frames
   local top = #frames - (level or 1)
+  -- a negative/out-of-range level must not index past the stack top (Lua's
+  -- lua_getstack returns 0 there); clamp so we never deref a nil frame.
+  if top > #frames then top = #frames end
   for i = top, 1, -1 do
     out[#out + 1] = "\t" .. self:traceback_line(i)
   end

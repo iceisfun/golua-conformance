@@ -1708,6 +1708,19 @@ local function install_debug(I)
   G.hash["debug"] = lib
   local function def(name, fn) lib.hash[name] = fn end
 
+  -- The only userdata we model is file handles, which have 0 user-value slots,
+  -- so every slot index is out of range: getuservalue yields a single nil (no
+  -- trailing boolean) and setuservalue fails, returning nil (not the userdata).
+  def("getuservalue", function(I, args) return R(nil) end)
+  def("setuservalue", function(I, args)
+    -- PUC luaL_checktype(1, userdata); then the set fails (0 slots) -> nil
+    local u = args[1]
+    if not (rt.is_table(u) and u.is_userdata) then
+      typeerror(I, 1, "setuservalue", "userdata", args)
+    end
+    return R(nil)
+  end)
+
   def("traceback", function(I, args)
     -- debug.traceback([thread,] [message [, level]])
     local idx = 1
@@ -1754,7 +1767,7 @@ local function install_debug(I)
         h["currentline"] = p.lines[frame.savedpc] or -1
         h["what"] = frame.proto.is_main and "main" or "Lua"
         h["linedefined"] = p.line or 0
-        h["lastlinedefined"] = p.lastline or p.line or 0
+        h["lastlinedefined"] = p.is_main and 0 or (p.lastline or p.line or 0)
         h["nparams"] = p.numparams
         h["nups"] = #p.upvals
         h["isvararg"] = p.is_vararg
@@ -1774,7 +1787,7 @@ local function install_debug(I)
       h["short_src"] = p.source
       h["what"] = p.is_main and "main" or "Lua"
       h["linedefined"] = p.line or 0
-      h["lastlinedefined"] = p.lastline or p.line or 0
+      h["lastlinedefined"] = p.is_main and 0 or (p.lastline or p.line or 0)
       h["currentline"] = -1
       h["nparams"] = p.numparams
       h["nups"] = #p.upvals

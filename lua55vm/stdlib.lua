@@ -404,7 +404,11 @@ local function install_base(I)
 
   local function load_chunk_file(I, path, env)
     local f, err = io.open(path, "rb")
-    if not f then return nil, err end
+    if not f then
+      -- Lua prefixes with "cannot open " and includes the filename once.
+      local reason = err:match("^.-: (.*)$") or err
+      return nil, "cannot open " .. path .. ": " .. reason
+    end
     local src = f:read("a"); f:close()
     -- skip a leading BOM
     if src:sub(1, 3) == "\239\187\191" then src = src:sub(4) end
@@ -447,9 +451,10 @@ local function install_base(I)
     local env = args[4]
     local has_env = args.n >= 4
     local src
-    if type(chunk) == "string" then
-      src = chunk
-      chunkname = chunkname or chunk
+    -- a number chunk is coerced to its string form (lua_tostring), like Lua
+    if type(chunk) == "string" or type(chunk) == "number" then
+      src = (type(chunk) == "number") and I:number_tostring(chunk) or chunk
+      chunkname = chunkname or src
     elseif rt.is_callable(chunk) then
       local parts = {}
       local bad = false
@@ -458,7 +463,9 @@ local function install_base(I)
         if not ok then return R(nil, r) end
         local piece = r[1]
         if piece == nil or piece == "" then break end
-        if type(piece) ~= "string" then bad = true; break end
+        -- a numeric piece is accepted as text (lua_isstring is true for numbers)
+        if type(piece) == "number" then piece = I:number_tostring(piece)
+        elseif type(piece) ~= "string" then bad = true; break end
         parts[#parts + 1] = piece
       end
       if bad then return R(nil, "reader function must return a string") end
@@ -468,8 +475,12 @@ local function install_base(I)
       argerror(I, 1, "load", "string or function expected")
     end
 
-    -- the mode string may only contain 'b' and/or 't' (Lua's checkmode)
-    if mode ~= nil and mode:match("[^bt]") then
+    -- coerce a numeric mode (luaL_optstring). The only mode char `load` itself
+    -- rejects is 'B' (fixed buffers, C-only) -> "invalid mode" (lbaselib
+    -- getMode); unknown chars are otherwise fine, and the t/b chunk-type checks
+    -- happen below.
+    if type(mode) == "number" then mode = I:number_tostring(mode) end
+    if mode ~= nil and mode:find("B", 1, true) then
       argerror(I, 3, "load", "invalid mode")
     end
     local binary = dump.is_binary(src)
@@ -783,10 +794,11 @@ local function install_string(I)
 
   def("dump", function(I, args)
     local fn = args[1]
-    if type(fn) == "function" then
-      I:rt_error("unable to dump given function")   -- native (C) function
+    -- a single check (PUC str_dump): any arg that is not a Lua function
+    -- (missing, nil, wrong type, or a C/native function) gets the same message.
+    if not rt.is_closure(fn) then
+      argerror(I, 1, "dump", "Lua function expected")
     end
-    if not rt.is_closure(fn) then typeerror(I, 1, "dump", "function", args) end
     local strip = rt.truthy(args[2])
     return R(require("dump").dump(fn.proto, strip))
   end)
@@ -1164,19 +1176,20 @@ local function install_os(I)
     return R(os.setlocale(loc))
   end
   h["execute"] = function(I, args)
-    if args.n == 0 then return R(os.execute()) end
+    -- absent OR explicit nil => shell-availability query
+    if args.n == 0 or args[1] == nil then return R(os.execute()) end
     local cmd = check_str(I, args, 1, "execute")
     return R(os.execute(cmd))
   end
   h["remove"] = function(I, args)
-    local ok, err = os.remove(check_str(I, args, 1, "remove"))
+    local ok, err, code = os.remove(check_str(I, args, 1, "remove"))
     if ok then return R(true) end
-    return R(nil, err)
+    return R(nil, err, code)   -- forward the errno (luaL_fileresult 3rd value)
   end
   h["rename"] = function(I, args)
-    local ok, err = os.rename(check_str(I, args, 1, "rename"), check_str(I, args, 2, "rename"))
+    local ok, err, code = os.rename(check_str(I, args, 1, "rename"), check_str(I, args, 2, "rename"))
     if ok then return R(true) end
-    return R(nil, err)
+    return R(nil, err, code)
   end
   h["exit"] = function(I, args)
     local code = args[1]

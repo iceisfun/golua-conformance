@@ -145,7 +145,10 @@ end
 
 local function frame_loc(frame)
   if not frame or frame.native or not frame.proto then return "" end
-  local line = frame.proto.lines[frame.savedpc] or 0
+  local line = frame.proto.lines[frame.savedpc]
+  -- luaL_where: emit a prefix only when there is real line info (currentline>0).
+  -- A function dumped with strip=true has no lines, so it gets no prefix.
+  if not line or line <= 0 then return "" end
   return string.format("%s:%d: ", frame.proto.source, line)
 end
 

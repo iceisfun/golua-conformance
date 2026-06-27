@@ -258,7 +258,8 @@ local function install_base(I)
 
   def("select", function(I, args)
     local sel = args[1]
-    if sel == "#" then return R(args.n - 1) end
+    -- any string whose first byte is '#' selects the count (PUC: *opt=='#')
+    if type(sel) == "string" and sel:byte(1) == 35 then return R(args.n - 1) end
     local i = check_int(I, args, 1, "select")
     if i < 0 then i = args.n + i
     elseif i == 0 then argerror(I, 1, "select", "index out of range") end
@@ -730,9 +731,14 @@ local function install_string(I)
       local fmt = check_str(I, args, 1, "unpack")
       local s = check_str(I, args, 2, "unpack")
       local pos = opt_int(I, args, 3, "unpack", 1)
-      local ok, res = pcall(function() return pack(string.unpack(fmt, s, pos)) end)
-      if not ok then I:rt_error((res:gsub("^.-:%d+: ", ""))) end
-      return res
+      -- Call the host as a VALUE (not via a `string.unpack(...)` field access)
+      -- so its own arg-error name resolution yields 'string.unpack', matching
+      -- the oracle (pack/packsize already do this).
+      local res = pack(pcall(string.unpack, fmt, s, pos))
+      if not res[1] then I:rt_error((res[2]:gsub("^.-:%d+: ", ""))) end
+      local out = { n = res.n - 1 }
+      for k = 2, res.n do out[k - 1] = res[k] end
+      return out
     end)
     def("packsize", function(I, args)
       local fmt = check_str(I, args, 1, "packsize")
@@ -781,10 +787,16 @@ local function install_table(I)
       rset(t, len + 1, args[2])
     elseif args.n == 3 then
       local pos = check_int(I, args, 2, "insert")
-      if pos < 1 or pos > len + 1 then
+      -- unsigned compare (pos-1 > len): avoids overflow when len == maxinteger
+      if pos < 1 or pos - 1 > len then
         argerror(I, 2, "insert", "position out of bounds")
       end
-      for i = len, pos, -1 do rset(t, i + 1, rget(t, i)) end
+      -- shift up t[pos..len]; compute e=len+1 with wraparound like PUC, so a
+      -- pathological __len (maxinteger) overflows e to mininteger and the loop
+      -- body simply never runs instead of spinning maxinteger times.
+      local e = len + 1
+      local i = e
+      while i > pos do rset(t, i, rget(t, i - 1)); i = i - 1 end
       rset(t, pos, args[3])
     else
       I:rt_error("wrong number of arguments to 'insert'")
@@ -839,10 +851,14 @@ local function install_table(I)
     local j
     if args[3] ~= nil then j = check_int(I, args, 3, "unpack") else j = I:len(t) end
     if i > j then return { n = 0 } end
-    local count = j - i + 1
-    if count < 0 or count >= 0x7FFFFFFF then
+    -- compare the DIFFERENCE before +1 so an extreme range (e.g. minI..maxI)
+    -- can't overflow to a small positive count and spin the loop. The limit is
+    -- Lua's LUAI_MAXSTACK (1e6); d<0 catches every signed-overflow case.
+    local d = j - i
+    if d < 0 or d >= 1000000 then
       I:rt_error("too many results to unpack")
     end
+    local count = d + 1
     local out = { n = count }
     for k = i, j do out[k - i + 1] = I:index(t, k) end
     return out
@@ -871,6 +887,14 @@ local function install_table(I)
     local a2 = args[5]
     if a2 == nil then a2 = a1 else a2 = check_table(I, args, 5, "move") end
     if e >= f then
+      -- overflow guards (mirror PUC tmove): reject ranges that would wrap.
+      if not (f > 0 or e < math.maxinteger + f) then
+        argerror(I, 3, "move", "too many elements to move")
+      end
+      local n = e - f + 1
+      if d > math.maxinteger - n + 1 then
+        argerror(I, 4, "move", "destination wrap around")
+      end
       if d > f and d <= e and a1 == a2 then
         for i = e, f, -1 do rset(a2, d + (i - f), rget(a1, i)) end
       else
@@ -887,6 +911,7 @@ local function install_table(I)
       typeerror(I, 2, "sort", "function", args)
     end
     local n = rgetn(t)
+    if n >= 0x7FFFFFFF then argerror(I, 1, "sort", "array too big") end
     local less
     if comp == nil then
       less = function(x, y) return I:lt(x, y) end

@@ -219,10 +219,10 @@ local function install_base(I)
   end)
 
   def("pcall", function(I, args)
+    if args.n == 0 then argerror(I, 1, "pcall", "value expected") end
     local fn = args[1]
-    if not rt.is_callable(fn) then
-      -- pcall still catches "attempt to call" via running it
-    end
+    -- a non-callable fn is NOT rejected here: pcall still runs it and catches
+    -- the resulting "attempt to call" error, like reference Lua.
     local cargs = { n = args.n - 1 }
     for i = 2, args.n do cargs[i - 1] = args[i] end
     local ok, res = I:protected(fn, cargs)
@@ -238,6 +238,9 @@ local function install_base(I)
   def("xpcall", function(I, args)
     local fn = args[1]
     local handler = args[2]
+    if not rt.is_callable(handler) then
+      typeerror(I, 2, "xpcall", "function", args)
+    end
     local cargs = { n = args.n - 2 }
     for i = 3, args.n do cargs[i - 2] = args[i] end
     -- handler runs with the stack intact (inside protected, before unwinding)
@@ -255,6 +258,36 @@ local function install_base(I)
   I.yieldable_natives = I.yieldable_natives or {}
   I.yieldable_natives[G.hash["pcall"]] = true
   I.yieldable_natives[G.hash["xpcall"]] = true
+
+  I.warn_on = I.warn_on or false
+  def("warn", function(I, args)
+    -- needs >= 1 arg; every arg must be a string (numbers are NOT accepted by
+    -- luaL_checkstring here... actually Lua's warn uses checkstring which
+    -- coerces numbers, so accept string or number). Validate ALL args BEFORE
+    -- emitting, so an error leaves no unfinished warning.
+    if args.n == 0 then typeerror(I, 1, "warn", "string", args) end
+    for i = 1, args.n do
+      local t = type(args[i])
+      if t ~= "string" and t ~= "number" then
+        typeerror(I, i, "warn", "string", args)
+      end
+    end
+    -- a single argument beginning with '@' is a control message
+    if args.n == 1 and type(args[1]) == "string" and args[1]:sub(1, 1) == "@" then
+      if args[1] == "@on" then I.warn_on = true
+      elseif args[1] == "@off" then I.warn_on = false end
+      return EMPTY
+    end
+    if I.warn_on then
+      local parts = {}
+      for i = 1, args.n do
+        local v = args[i]
+        parts[i] = (type(v) == "number") and I:number_tostring(v) or v
+      end
+      io.stderr:write("Lua warning: ", table.concat(parts), "\n")
+    end
+    return EMPTY
+  end)
 
   def("select", function(I, args)
     local sel = args[1]

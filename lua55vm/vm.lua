@@ -902,6 +902,8 @@ function Interp:protected(fn, args, handler)
     local hok, hr = pcall(self.call, self, handler, { errval(res), n = 1 })
     -- if the message handler itself errors, Lua reports LUA_ERRERR
     if hok then hresult = hr[1] else hresult = "error in error handling" end
+    -- a nil handler RESULT is subject to the nil-error-object rule too
+    if hok and hresult == nil then hresult = "<no error object>" end
   end
   -- now unwind, running pending to-be-closed handlers (inner frames first); pop
   -- each frame BEFORE running its handler so nested calls stay contiguous.

@@ -1147,21 +1147,126 @@ end
 -- os / io (minimal, host-backed)
 -- ---------------------------------------------------------------------------
 
+-- os.date conversion specifiers, grouped by length ('||' precedes 2-char
+-- options), exactly as PUC C99 LUA_STRFTIMEOPTIONS; the matcher below mirrors
+-- loslib.c checkoption byte-for-byte.
+local STRFTIMEOPTIONS =
+  "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%" .. "||" ..
+  "EcECExEXEyEY" .. "OdOeOHOIOmOMOSOuOUOVOwOWOy"
+
+-- length (1 or 2) of the valid option at the start of `conv`, or nil if invalid
+local function strftime_optlen(conv)
+  local convlen = #conv
+  local opt = STRFTIMEOPTIONS
+  local olen = #opt
+  local oplen = 1
+  local oi = 1
+  while oi <= olen and oplen <= convlen do
+    local ch = opt:sub(oi, oi)
+    if ch == "|" then
+      oplen = oplen + 1
+    elseif opt:sub(oi, oi + oplen - 1) == conv:sub(1, oplen) then
+      return oplen
+    end
+    oi = oi + oplen
+  end
+  return nil
+end
+
+-- PUC os.time getfield: read+validate an integer date-table field. `d<0` means
+-- the field is required (no default). `delta` is the C-struct-tm bias used only
+-- for the out-of-bound check; the returned value keeps Lua conventions.
+local function date_getfield(I, t, key, d, delta)
+  local v = I:index(t, key)
+  local res
+  if type(v) == "number" then res = rt.toint(v)
+  elseif type(v) == "string" then local n = tonumber(v); res = n and rt.toint(n) or nil end
+  if res == nil then
+    if v ~= nil then
+      I:rt_error("field '" .. key .. "' is not an integer")
+    elseif d < 0 then
+      I:rt_error("field '" .. key .. "' missing in date table")
+    end
+    return d
+  end
+  local INT_MAX, INT_MIN = 2147483647, -2147483648
+  -- the tm field (res-delta) must fit in a C int; written as a real ternary
+  -- (NOT `a and b or c`, since the b branch can legitimately be false)
+  local inbounds
+  if res >= 0 then inbounds = (res - delta <= INT_MAX)
+  else inbounds = (INT_MIN + delta <= res) end
+  if not inbounds then I:rt_error("field '" .. key .. "' is out-of-bound") end
+  return res
+end
+
+local DATE_FIELDS = { "year", "month", "day", "hour", "min", "sec", "wday", "yday", "isdst" }
+
 local function install_os(I)
   local G = I.globals
   local lib = rt.new_table()
   G.hash["os"] = lib
   local h = lib.hash
-  h["time"] = function(I, args) return R(os.time()) end
+  h["time"] = function(I, args)
+    -- no arg / nil => current epoch
+    if args.n == 0 or args[1] == nil then return R(os.time()) end
+    local t = check_table(I, args, 1, "time")
+    -- read & validate fields natively in PUC order (errors fire in this order)
+    local hostbl = {
+      year = date_getfield(I, t, "year", -1, 1900),
+      month = date_getfield(I, t, "month", -1, 1),
+      day = date_getfield(I, t, "day", -1, 0),
+      hour = date_getfield(I, t, "hour", 12, 0),
+      min = date_getfield(I, t, "min", 0, 0),
+      sec = date_getfield(I, t, "sec", 0, 0),
+    }
+    local dst = I:index(t, "isdst")
+    if dst ~= nil then hostbl.isdst = rt.truthy(dst) end
+    -- the host's mktime does the calendar/TZ conversion AND normalizes the
+    -- table in place (setallfields); copy the normalized fields back.
+    local ok, epoch = pcall(os.time, hostbl)
+    if not ok or epoch == nil then
+      I:rt_error("time result cannot be represented in this installation")
+    end
+    for _, k in ipairs(DATE_FIELDS) do
+      if hostbl[k] ~= nil then rt.rawset(t, k, hostbl[k]) end
+    end
+    return R(epoch)
+  end
   h["clock"] = function(I, args) return R(os.clock()) end
   h["date"] = function(I, args)
-    local fmt = args[1]
-    if fmt == nil then return R(os.date()) end
-    fmt = check_str(I, args, 1, "date")
-    if args[2] ~= nil then
-      return R(os.date(fmt, check_int(I, args, 2, "date")))
+    -- format defaults to "%c"; a number is coerced (luaL_optlstring)
+    local fmt
+    if args.n == 0 or args[1] == nil then fmt = "%c" else fmt = check_str(I, args, 1, "date") end
+    local t
+    if args.n >= 2 and args[2] ~= nil then t = check_int(I, args, 2, "date") else t = os.time() end
+    local utc = false
+    if fmt:sub(1, 1) == "!" then utc = true; fmt = fmt:sub(2) end
+    if fmt == "*t" then
+      -- build a real guest table from the host's broken-down time
+      local ok, fields = pcall(os.date, utc and "!*t" or "*t", t)
+      if not ok or type(fields) ~= "table" then
+        I:rt_error("date result cannot be represented in this installation")
+      end
+      local gt = rt.new_table()
+      for _, k in ipairs(DATE_FIELDS) do rt.rawset(gt, k, fields[k]) end
+      return R(gt)
     end
-    return R(os.date(fmt))
+    -- validate every conversion specifier natively (so a bad one raises a
+    -- guest arg-error with the right funcname, not a leaked host error)
+    local i = 1
+    while i <= #fmt do
+      if fmt:sub(i, i) == "%" then
+        local conv = fmt:sub(i + 1)
+        local oplen = strftime_optlen(conv)
+        if not oplen then
+          argerror(I, 1, "date", "invalid conversion specifier '%" .. conv .. "'")
+        end
+        i = i + 1 + oplen
+      else
+        i = i + 1
+      end
+    end
+    return R(os.date((utc and "!" or "") .. fmt, t))
   end
   h["getenv"] = function(I, args) return R(os.getenv(check_str(I, args, 1, "getenv"))) end
   h["difftime"] = function(I, args)

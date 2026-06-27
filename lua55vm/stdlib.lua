@@ -270,8 +270,16 @@ local function install_base(I)
 
   def("next", function(I, args)
     local t = check_table(I, args, 1, "next")
-    local k = rt.normalize_key(args[2])
-    local nk, nv = rt.tnext(t, k)
+    -- `next` does NOT coerce a float key to an integer (unlike indexing): a
+    -- float that isn't an exact stored key is invalid, e.g. next({1,2,3}, 2.0).
+    local k = args[2]
+    local ok, nk, nv = pcall(rt.tnext, t, k)
+    if not ok then
+      -- the host backing table rejected the key; surface Lua's exact error
+      -- object ("invalid key to 'next'", no position prefix), not the wrapped
+      -- internal host string.
+      I:throw("invalid key to 'next'")
+    end
     if nk == nil then return R(nil) end
     return R(nk, nv)
   end)

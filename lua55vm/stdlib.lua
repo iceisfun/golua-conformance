@@ -1326,9 +1326,6 @@ local function install_io(I)
       pcall(function() f.hash.__file:close() end)
     end
   end
-  file_meta.hash["__close"] = function(I, args) close_handle(args[1]); return EMPTY end
-  file_meta.hash["__gc"] = function(I, args) close_handle(args[1]); return EMPTY end
-
   local function wrap_file(hostf)
     local fobj = rt.new_table()
     fobj.meta = file_meta
@@ -1348,6 +1345,13 @@ local function install_io(I)
     return v
   end
 
+  file_meta.hash["__close"] = function(I, args)
+    check_file(I, args, "?"); close_handle(args[1]); return EMPTY
+  end
+  file_meta.hash["__gc"] = function(I, args)
+    check_file(I, args, "?"); close_handle(args[1]); return EMPTY
+  end
+
   local function norm_fmt(fmt)
     if type(fmt) == "string" then
       local f = fmt:gsub("^%*", "")   -- accept legacy "*l" etc.
@@ -1356,34 +1360,75 @@ local function install_io(I)
     return fmt
   end
 
+  -- luaL_checkoption: a string/number option that must be in `valid`. The name
+  -- passed is "?" so it resolves like a file method (caller-name for method
+  -- syntax, "?" via pcall) -- never the literal.
+  local function check_option(I, args, idx, valid, default)
+    local v = args[idx]
+    if v == nil and args.n < idx then return default end
+    local s = (type(v) == "number") and I:number_tostring(v) or v
+    if type(s) ~= "string" then
+      argerror(I, idx, "?", "string expected, got " .. I:objtypename(v))
+    end
+    for _, o in ipairs(valid) do if s == o then return s end end
+    argerror(I, idx, "?", "invalid option '" .. s .. "'")
+  end
+
+  -- Shared read core (PUC g_read): formats start at args[first]; reads stop at
+  -- the first failed format (its result becomes nil, the rest are absent). The
+  -- arg index passed to argerror counts from 1 in the native's own frame, so it
+  -- resolves to 'io.read' (via func_names) or 'read'/'?' for a file method.
+  local function read_formats(I, hostf, args, first)
+    if args.n < first then return R(hostf:read("l")) end
+    local out = { n = 0 }
+    local success = true
+    for n = first, args.n do
+      if not success then break end
+      local fmt = args[n]
+      local res, isall = nil, false
+      if type(fmt) == "number" then
+        res = hostf:read(math.floor(fmt))
+      elseif type(fmt) == "string" then
+        local p = fmt:gsub("^%*", "")        -- accept legacy "*l" etc.
+        local c = p:sub(1, 1)
+        if c == "a" then isall = true; res = hostf:read("a")
+        elseif c == "n" or c == "l" or c == "L" then res = hostf:read(p)
+        else argerror(I, n, "?", "invalid format") end
+      else
+        argerror(I, n, "?", "string expected, got " .. I:objtypename(fmt))
+      end
+      out.n = out.n + 1
+      out[out.n] = res
+      success = isall or (res ~= nil)
+    end
+    if not success then out[out.n] = nil end
+    return out
+  end
+
   local function fm(name, fn) file_methods.hash[name] = fn end
 
   fm("write", function(I, args)
-    local fobj = args[1]
-    local hostf = fobj.hash.__file
+    local f = check_file(I, args, "?")
+    local hostf = f.hash.__file
     for i = 2, args.n do
       local v = args[i]
-      if type(v) == "number" then hostf:write(I:number_tostring(v))
-      elseif type(v) == "string" then hostf:write(v)
-      else argerror(I, i - 1, "write", "string expected, got " .. rt.typename(v)) end
+      local s
+      if type(v) == "number" then s = I:number_tostring(v)
+      elseif type(v) == "string" then s = v
+      else argerror(I, i, "?", "string expected, got " .. I:objtypename(v)) end
+      local ok, err, code = hostf:write(s)
+      if not ok then return R(nil, err, code) end   -- luaL_fileresult
     end
-    return R(fobj)
+    return R(f)   -- success: return the file (for f:write(...) chaining)
   end)
 
   fm("read", function(I, args)
-    local hostf = args[1].hash.__file
-    if args.n <= 1 then return R(hostf:read("l")) end
-    local out = { n = args.n - 1 }
-    for i = 2, args.n do
-      local fmt = args[i]
-      if type(fmt) == "number" then out[i - 1] = hostf:read(fmt)
-      else out[i - 1] = hostf:read(norm_fmt(fmt)) end
-    end
-    return out
+    local hostf = check_file(I, args, "?").hash.__file
+    return read_formats(I, hostf, args, 2)
   end)
 
   fm("lines", function(I, args)
-    local hostf = check_file(I, args, "lines").hash.__file
+    local hostf = check_file(I, args, "?").hash.__file
     local fmts = {}
     for i = 2, args.n do fmts[i - 1] = norm_fmt(args[i]) end
     local it = (#fmts > 0) and hostf:lines(unpack(fmts)) or hostf:lines()
@@ -1391,20 +1436,20 @@ local function install_io(I)
   end)
 
   fm("close", function(I, args)
-    local f = check_file(I, args, "close")
+    local f = check_file(I, args, "?")
     if f.is_std then return R(nil, "cannot close standard file") end
     f.hash.__closed = true
-    local ok = f.hash.__file:close()
-    return R(ok)
+    local ok, how, code = f.hash.__file:close()
+    return R(ok, how, code)   -- forward the (how, code) tuple (e.g. popen exit)
   end)
 
   fm("flush", function(I, args)
-    check_file(I, args, "flush").hash.__file:flush(); return R(args[1])
+    check_file(I, args, "?").hash.__file:flush(); return R(true)
   end)
 
   fm("seek", function(I, args)
-    local hostf = check_file(I, args, "seek").hash.__file
-    local whence = args[2] or "cur"
+    local hostf = check_file(I, args, "?").hash.__file
+    local whence = check_option(I, args, 2, { "set", "cur", "end" }, "cur")
     local offset = opt_int(I, args, 3, "seek", 0)
     local pos, err, code = hostf:seek(whence, offset)
     if pos then return R(pos) end
@@ -1412,7 +1457,11 @@ local function install_io(I)
   end)
 
   fm("setvbuf", function(I, args)
-    return R(args[1])
+    local f = check_file(I, args, "?")
+    local mode = check_option(I, args, 2, { "no", "full", "line" })
+    local size = opt_int(I, args, 3, "setvbuf", 0)
+    pcall(function() f.hash.__file:setvbuf(mode, size) end)
+    return R(f)
   end)
 
   local stdout = wrap_file(io.stdout)
@@ -1458,28 +1507,39 @@ local function install_io(I)
   end
 
   h["close"] = function(I, args)
-    local fobj = args[1] or default_out
-    return I:call(file_methods.hash["close"], { fobj, n = 1 })
+    -- absent arg => default output; an explicit nil is a bad FILE* (not the
+    -- default). Validate here so the name resolves to 'io.close' via func_names.
+    local f
+    if args.n == 0 then f = default_out else f = check_file(I, args, "?") end
+    if f.is_std then return R(nil, "cannot close standard file") end
+    f.hash.__closed = true
+    local ok, how, code = f.hash.__file:close()
+    return R(ok, how, code)
   end
 
   h["write"] = function(I, args)
     -- inlined (not delegated through file:write) so io.write is a single C
-    -- frame: error location points at the guest caller and the name falls back
-    -- to 'io.write' via func_names when there's no call-site name.
+    -- frame: error location points at the guest caller and the name resolves to
+    -- 'io.write' via func_names when there's no call-site name.
+    if default_out.hash.__closed then
+      I:rt_error("default output file is closed")
+    end
     local hostf = default_out.hash.__file
     for i = 1, args.n do
       local v = args[i]
-      if type(v) == "number" then hostf:write(I:number_tostring(v))
-      elseif type(v) == "string" then hostf:write(v)
+      local s
+      if type(v) == "number" then s = I:number_tostring(v)
+      elseif type(v) == "string" then s = v
       else argerror(I, i, "write", "string expected, got " .. I:objtypename(v)) end
+      local ok, err, code = hostf:write(s)
+      if not ok then return R(nil, err, code) end
     end
     return R(default_out)
   end
 
   h["read"] = function(I, args)
-    local a = { default_in, n = args.n + 1 }
-    for i = 1, args.n do a[i + 1] = args[i] end
-    return I:call(file_methods.hash["read"], a)
+    -- inlined (single frame) so the name resolves to 'io.read' via func_names
+    return read_formats(I, default_in.hash.__file, args, 1)
   end
 
   h["lines"] = function(I, args)
@@ -1498,7 +1558,7 @@ local function install_io(I)
   end
 
   h["flush"] = function(I, args)
-    default_out.hash.__file:flush(); return R(default_out)
+    default_out.hash.__file:flush(); return R(true)
   end
 
   h["type"] = function(I, args)
@@ -1510,24 +1570,31 @@ local function install_io(I)
 
   -- io.input/io.output: a string/number arg is a filename to open; any other
   -- non-file argument is rejected as a bad FILE* (like Lua's g_iofile/tofile).
-  h["output"] = function(I, args)
+  -- g_iofile: open a filename (cannot-open formatted natively) or adopt a file
+  -- handle (rejecting a closed one), else a bad FILE* type error.
+  local function iofile(I, args, fname, mode)
     local a = args[1]
-    if a ~= nil then
-      if type(a) == "string" or type(a) == "number" then
-        default_out = wrap_file(assert(io.open(tostring(a), "w")))
-      elseif is_file(a) then default_out = a
-      else typeerror(I, 1, "output", "FILE*", args) end
+    if type(a) == "string" or type(a) == "number" then
+      local name = (type(a) == "number") and I:number_tostring(a) or a
+      local hostf, err = io.open(name, mode)
+      if not hostf then
+        I:rt_error("cannot open file '" .. name .. "' (" ..
+          tostring(err):gsub("^.-: ", "") .. ")")
+      end
+      return wrap_file(hostf)
+    elseif is_file(a) then
+      if a.hash.__closed then I:rt_error("attempt to use a closed file") end
+      return a
+    else
+      typeerror(I, 1, fname, "FILE*", args)
     end
+  end
+  h["output"] = function(I, args)
+    if args[1] ~= nil then default_out = iofile(I, args, "output", "w") end
     return R(default_out)
   end
   h["input"] = function(I, args)
-    local a = args[1]
-    if a ~= nil then
-      if type(a) == "string" or type(a) == "number" then
-        default_in = wrap_file(assert(io.open(tostring(a), "r")))
-      elseif is_file(a) then default_in = a
-      else typeerror(I, 1, "input", "FILE*", args) end
-    end
+    if args[1] ~= nil then default_in = iofile(I, args, "input", "r") end
     return R(default_in)
   end
 end

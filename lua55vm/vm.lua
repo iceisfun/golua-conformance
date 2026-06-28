@@ -809,6 +809,12 @@ function Interp:exec_loop(frame)
       pc = ins.b                                   -- jump to TFORCALL
     elseif op == "TFORCALL" then
       local fn = R[a]
+      -- like PUC's funcnamefromcode for OP_TFORCALL: a non-callable iterator
+      -- reports the "(for iterator 'for iterator')" context.
+      if not rt.is_callable(fn) and self:metamethod(fn, "__call") == nil then
+        self:rt_error("attempt to call a " .. rt.typename(fn)
+          .. " value (for iterator 'for iterator')")
+      end
       local cargs = { n = 2, R[a + 1], R[a + 3] }  -- state, control
       local res = self:call(fn, cargs)
       local nvars = ins.c

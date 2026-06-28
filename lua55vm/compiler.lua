@@ -134,11 +134,15 @@ function FS:enter_block(is_loop)
   return b
 end
 
-function FS:leave_block()
+function FS:leave_block(closeline)
   local b = table.remove(self.blocks)
-  -- emit CLOSE for captured / to-be-closed locals in this block
+  -- emit CLOSE for captured / to-be-closed locals in this block.
+  -- PUC attributes the block-exit close to ls->lastline (the line of the last
+  -- token consumed before leaving the block), NOT self.curline (the line of the
+  -- last sub-expression).  `closeline` carries that line; callers pass the
+  -- block's lastline (do/control bodies) or the `end` line (function body).
   if b.has_capture then
-    self:emit("CLOSE", b.firstreg)
+    self:emit("CLOSE", b.firstreg, nil, nil, closeline or self.curline)
   end
   -- Resolve gotos against labels in THIS block (labels go out of scope now).
   -- Unmatched gotos escape to the enclosing block with a reduced active-var
@@ -930,14 +934,17 @@ local function compile_genfor(fs, node)
   fs:reserve(4)
   if nvars > 1 then fs:reserve(nvars - 1) end
   fs.freereg = base + 3 + nvars
-  local prep = fs:emit("TFORPREP", base, 0, nil, node.line)
-  fs.ntbc = fs.ntbc + 1
   local b = fs:enter_block(true)
   b.firstreg = base
-  -- hidden internal locals so goto/break CLOSE levels include the tbc at base+2
+  -- hidden internal locals so goto/break CLOSE levels include the tbc at base+2.
+  -- Activate them BEFORE emitting TFORPREP (mirrors PUC's adjustlocalvars(4)
+  -- before forbody): their debug ranges then cover the TFORPREP, so the tbc
+  -- non-closable check reports the control var's name "(for state)", not '?'.
   fs:new_local("(for state)", base, nil)
   fs:new_local("(for state)", base + 1, nil)
   fs:new_local("(for state)", base + 2, nil)
+  local prep = fs:emit("TFORPREP", base, 0, nil, node.line)
+  fs.ntbc = fs.ntbc + 1
   for i = 1, nvars do
     -- only the first (control) variable is read-only in Lua 5.5
     fs:new_local(node.names[i], base + 3 + (i - 1), (i == 1) and "const" or nil)
@@ -1088,7 +1095,7 @@ end
 function compile_block_scoped(fs, block)
   fs:enter_block(false)
   for _, s in ipairs(block.stmts) do compile_stmt(fs, s) end
-  fs:leave_block()
+  fs:leave_block(block.lastline)
 end
 
 -- compile a block WITHOUT a fresh scope mgmt wrapper assumption: used where the
@@ -1126,8 +1133,8 @@ function Compiler.compile_function(parent_fs, node)
     fs.vararg_reg = reg     -- `...` now aliases this table
   end
   for _, s in ipairs(node.body.stmts) do compile_stmt(fs, s) end
-  -- implicit return
-  fs:leave_block()
+  -- implicit return; the function-body block-exit close folds to the `end` line
+  fs:leave_block(node.endline or node.line)
   fs:emit("RETURN", 0, 1, nil, node.endline or node.line)  -- final return on 'end' line
 
   Compiler.resolve_gotos(fs)
@@ -1167,7 +1174,7 @@ function Compiler.compile_main(ast, source, chunkname)
   root.proto.lastline = ast.endline or 0
   root:enter_block(false)
   for _, s in ipairs(ast.body.stmts) do compile_stmt(root, s) end
-  root:leave_block()
+  root:leave_block(ast.body.lastline or ast.endline)
   -- implicit final return is attributed to the chunk's last line (like Lua)
   root:emit("RETURN", 0, 1, nil, ast.endline or 0)
   Compiler.resolve_gotos(root)

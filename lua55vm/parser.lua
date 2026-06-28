@@ -115,6 +115,7 @@ local BLOCK_END = {
 -- its end (into the `until` condition), so trailing labels are NOT void.
 function Parser:block(keep_trailing_scope)
   local stmts = {}
+  local startidx = self.i
   while true do
     local t = self:cur()
     if t.type == "eof" or (t.type == "keyword" and BLOCK_END[t.value]) then
@@ -140,7 +141,13 @@ function Parser:block(keep_trailing_scope)
       end
     end
   end
-  return { tag = "Block", stmts = stmts }
+  -- `lastline` mirrors PUC's ls->lastline at leaveblock: the line of the last
+  -- token consumed inside the block (the token just before the closing keyword).
+  -- The block-exit CLOSE (captured / to-be-closed locals) is attributed here.
+  local prev = self.toks[self.i - 1]
+  local lastline = (self.i > startidx and prev and prev.line)
+    or (self:cur() and self:cur().line) or 0
+  return { tag = "Block", stmts = stmts, lastline = lastline }
 end
 
 function Parser:statement()

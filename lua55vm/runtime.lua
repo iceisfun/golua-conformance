@@ -381,7 +381,7 @@ function M.install(Interp)
         if mt == nil then return nil end
         local h = mt.hash["__index"]
         if h == nil then return nil end
-        if M.is_callable(h) then return (self:call(h, { t, k, n = 2 }))[1] end
+        if M.is_callable(h) then return (self:call_meta("index", h, { t, k, n = 2 }))[1] end
         t = h   -- delegate to the __index table
       else
         -- non-table: must have __index or it's an error
@@ -389,7 +389,7 @@ function M.install(Interp)
         if h == nil then
           self:rt_error("attempt to index a " .. M.typename(t) .. " value")
         end
-        if M.is_callable(h) then return (self:call(h, { t, k, n = 2 }))[1] end
+        if M.is_callable(h) then return (self:call_meta("index", h, { t, k, n = 2 }))[1] end
         t = h
       end
     end
@@ -416,7 +416,7 @@ function M.install(Interp)
           return
         end
         if M.is_callable(h) then
-          self:call(h, { t, k, v, n = 3 })
+          self:call_meta("newindex", h, { t, k, v, n = 3 })
           return
         end
         t = h   -- delegate to the __newindex table
@@ -426,7 +426,7 @@ function M.install(Interp)
           self:rt_error("attempt to index a " .. M.typename(t) .. " value")
         end
         if M.is_callable(h) then
-          self:call(h, { t, k, v, n = 3 })
+          self:call_meta("newindex", h, { t, k, v, n = 3 })
           return
         end
         t = h
@@ -492,11 +492,18 @@ function M.install(Interp)
     return self:arith_meta(op, a, b)
   end
 
+  -- call a metamethod handler, tagging the call so that a non-callable handler
+  -- yields "... (metamethod 'NAME')" in the call error (event is the short name).
+  function Interp:call_meta(name, h, args)
+    self.next_callinfo = { what = "metamethod", name = name }
+    return self:call(h, args)
+  end
+
   function Interp:arith_meta(op, a, b)
     local event = ARITH_EVENT[op]
     local h = self:metamethod(a, event) or self:metamethod(b, event)
     if h ~= nil then
-      return (self:call(h, { a, b, n = 2 }))[1]
+      return (self:call_meta(event:sub(3), h, { a, b, n = 2 }))[1]
     end
     if BITWISE[op] then
       -- bitwise does not coerce strings: only two real numbers can reach the
@@ -527,7 +534,7 @@ function M.install(Interp)
     local na = tonum(a)
     if na ~= nil then return -na end
     local h = self:metamethod(a, "__unm")
-    if h ~= nil then return (self:call(h, { a, a, n = 2 }))[1] end
+    if h ~= nil then return (self:call_meta("unm", h, { a, a, n = 2 }))[1] end
     if type(a) == "string" then
       self:rt_error("attempt to unm a 'string' with a 'string'")
     end
@@ -539,7 +546,7 @@ function M.install(Interp)
     local ia = toint(a)
     if ia ~= nil then return ~ia end
     local h = self:metamethod(a, "__bnot")
-    if h ~= nil then return (self:call(h, { a, a, n = 2 }))[1] end
+    if h ~= nil then return (self:call_meta("bnot", h, { a, a, n = 2 }))[1] end
     if type(a) == "number" then
       self:rt_error("number" .. self:hint_for(a) .. " has no integer representation")
     end
@@ -554,11 +561,11 @@ function M.install(Interp)
     if M.is_table(v) then
       local mt = v.meta
       local h = mt and mt.hash["__len"]
-      if h ~= nil then return (self:call(h, { v, v, n = 2 }))[1] end
+      if h ~= nil then return (self:call_meta("len", h, { v, v, n = 2 }))[1] end
       return M.getn(v)
     end
     local h = self:metamethod(v, "__len")
-    if h ~= nil then return (self:call(h, { v, v, n = 2 }))[1] end
+    if h ~= nil then return (self:call_meta("len", h, { v, v, n = 2 }))[1] end
     self:rt_error("attempt to get length of a " .. M.typename(v) .. " value"
       .. self:hint_for(v))
   end
@@ -579,7 +586,7 @@ function M.install(Interp)
     end
     local h = self:metamethod(a, "__concat") or self:metamethod(b, "__concat")
     if h ~= nil then
-      return (self:call(h, { a, b, n = 2 }))[1]
+      return (self:call_meta("concat", h, { a, b, n = 2 }))[1]
     end
     local bad
     if concatable(a) then bad = b else bad = a end
@@ -604,7 +611,7 @@ function M.install(Interp)
     if M.is_table(a) and M.is_table(b) then
       local h = self:metamethod(a, "__eq") or self:metamethod(b, "__eq")
       if h ~= nil then
-        return M.truthy((self:call(h, { a, b, n = 2 }))[1])
+        return M.truthy((self:call_meta("eq", h, { a, b, n = 2 }))[1])
       end
     end
     return false
@@ -616,7 +623,7 @@ function M.install(Interp)
     if ta == "number" and tb == "number" then return a < b end
     if ta == "string" and tb == "string" then return a < b end
     local h = self:metamethod(a, "__lt") or self:metamethod(b, "__lt")
-    if h ~= nil then return M.truthy((self:call(h, { a, b, n = 2 }))[1]) end
+    if h ~= nil then return M.truthy((self:call_meta("lt", h, { a, b, n = 2 }))[1]) end
     self:cmp_error(a, b)
   end
 
@@ -626,7 +633,7 @@ function M.install(Interp)
     if ta == "number" and tb == "number" then return a <= b end
     if ta == "string" and tb == "string" then return a <= b end
     local h = self:metamethod(a, "__le") or self:metamethod(b, "__le")
-    if h ~= nil then return M.truthy((self:call(h, { a, b, n = 2 }))[1]) end
+    if h ~= nil then return M.truthy((self:call_meta("le", h, { a, b, n = 2 }))[1]) end
     self:cmp_error(a, b)
   end
 

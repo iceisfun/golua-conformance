@@ -225,7 +225,12 @@ local function install_base(I)
     -- the resulting "attempt to call" error, like reference Lua.
     local cargs = { n = args.n - 1 }
     for i = 2, args.n do cargs[i - 1] = args[i] end
+    -- pcall clears the message handler (errfunc): a load(reader) error inside
+    -- preserves its raw error object. Restored after the protected call returns.
+    local saved_msgh = I.msgh
+    I.msgh = I.MSGH_CLEARED
     local ok, res = I:protected(fn, cargs)
+    I.msgh = saved_msgh
     if ok then
       local out = { true, n = res.n + 1 }
       for i = 1, res.n do out[i + 1] = res[i] end
@@ -243,8 +248,13 @@ local function install_base(I)
     end
     local cargs = { n = args.n - 2 }
     for i = 3, args.n do cargs[i - 2] = args[i] end
-    -- handler runs with the stack intact (inside protected, before unwinding)
+    -- handler runs with the stack intact (inside protected, before unwinding).
+    -- xpcall also installs its handler as the message handler (errfunc), so a
+    -- load(reader) error inside the body is routed through it. Restored after.
+    local saved_msgh = I.msgh
+    I.msgh = handler
     local ok, res = I:protected(fn, cargs, handler)
+    I.msgh = saved_msgh
     if ok then
       local out = { true, n = res.n + 1 }
       for i = 1, res.n do out[i + 1] = res[i] end
@@ -456,19 +466,45 @@ local function install_base(I)
       src = (type(chunk) == "number") and I:number_tostring(chunk) or chunk
       chunkname = chunkname or src
     elseif rt.is_callable(chunk) then
+      -- Reader (and reader-type) errors mirror PUC's luaD_protectedparser: they
+      -- propagate under the thread's CURRENT message handler (I.msgh). A direct
+      -- top-level load runs under the standalone msghandler (stringified +
+      -- traceback); pcall clears it (raw error preserved); xpcall's handler is
+      -- invoked (and counts as a handler call). load returns the resulting
+      -- value as its message, so the reader error is NOT re-raised to the caller.
+      local saved_n = #I.frames
       local parts = {}
-      local bad = false
+      local errmsg, errored = nil, false
       while true do
-        local ok, r = I:protected(chunk, { n = 0 })   -- catch reader errors
-        if not ok then return R(nil, r) end
+        local ok, r = pcall(I.call, I, chunk, { n = 0 })   -- run the reader
+        if not ok then
+          -- the reader raised: process under I.msgh with frames still intact
+          -- (so a default/traceback handler can see the reader frame), then
+          -- unwind the reader's leftover frames.
+          local raw = r
+          if type(raw) == "table" and getmetatable(raw) == I.GUEST_ERR_MT then
+            raw = raw.value
+          end
+          errmsg = I:apply_msgh(raw)
+          for j = #I.frames, saved_n + 1, -1 do I.frames[j] = nil end
+          errored = true
+          break
+        end
         local piece = r[1]
         if piece == nil or piece == "" then break end
         -- a numeric piece is accepted as text (lua_isstring is true for numbers)
         if type(piece) == "number" then piece = I:number_tostring(piece)
-        elseif type(piece) ~= "string" then bad = true; break end
+        elseif type(piece) ~= "string" then
+          -- a non-string return is a runtime error inside the parse (generic_
+          -- reader's luaL_error), subject to the same message handler. 'where'
+          -- is the load call site (top frame is the load native frame here).
+          errmsg = I:apply_msgh(I:where() .. "reader function must return a string")
+          errored = true
+          break
+        end
         parts[#parts + 1] = piece
       end
-      if bad then return R(nil, "reader function must return a string") end
+      if errored then return R(nil, errmsg) end
       src = table.concat(parts)
       chunkname = chunkname or "=(load)"
     else
@@ -1614,7 +1650,10 @@ local function install_coroutine(I)
   I.SELFCLOSE_MT = I.SELFCLOSE_MT or {}
 
   local function new_thread(f)
-    local th = setmetatable({ frames = {}, depth = 0 }, rt.THREAD_MT)
+    -- a fresh coroutine has its own cleared message handler (errfunc == 0): a
+    -- load(reader) error directly in its body preserves the raw error object.
+    local th = setmetatable({ frames = {}, depth = 0, msgh = I.MSGH_CLEARED },
+      rt.THREAD_MT)
     I:gc_register(th)
     th.co = coroutine.create(function(...)
       local a = pack(...)
@@ -1634,7 +1673,9 @@ local function install_coroutine(I)
     local saved_frames, saved_depth = I.frames, I.depth
     local saved_cur = I.current_thread
     local saved_hook, saved_hcount = I.hook, I.hookcount
+    local saved_msgh = I.msgh
     I.frames, I.depth = th.frames, th.depth
+    I.msgh = th.msgh or I.MSGH_CLEARED      -- the coroutine's own errfunc context
     I.current_thread = th
     I.hook = th.hook                       -- the coroutine's own hook
     I.hookcount = (th.hook and th.hook.count) or 0
@@ -1649,6 +1690,7 @@ local function install_coroutine(I)
       I.frames = {}
       th.frames, th.depth = {}, 0
       I.frames, I.depth = saved_frames, saved_depth
+      I.msgh = saved_msgh
       I.current_thread = saved_cur
       th.closing = nil
       local err = rr[2].err
@@ -1679,7 +1721,9 @@ local function install_coroutine(I)
       rr[2] = errobj
     end
     th.frames, th.depth = I.frames, I.depth
+    th.msgh = I.msgh                          -- persist the coroutine's errfunc
     I.frames, I.depth = saved_frames, saved_depth
+    I.msgh = saved_msgh
     I.current_thread = saved_cur
     return rr
   end

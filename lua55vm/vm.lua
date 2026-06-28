@@ -47,6 +47,13 @@ function Interp.new()
   self.frames = {}                    -- guest call stack (for errors/traceback)
   self.depth = 0
   self.max_depth = 10000              -- matches golua DefaultMaxCallDepth
+  -- message-handler (errfunc) context, consulted by load(reader) when the
+  -- reader/parse raises. The main thread starts under the standalone
+  -- msghandler (DEFAULT: stringify + traceback); pcall clears it, xpcall sets
+  -- its own handler. See stdlib pcall/xpcall and Interp:apply_msgh.
+  self.MSGH_DEFAULT = { default = true }   -- standalone msghandler sentinel
+  self.MSGH_CLEARED = { cleared = true }   -- no handler (raw error preserved)
+  self.msgh = self.MSGH_DEFAULT
   return self
 end
 
@@ -77,7 +84,10 @@ end
 -- an earlier __close) is passed as the 2nd argument to each handler and chains:
 -- if a handler raises, that becomes the new pending error. Returns the final
 -- pending error (or nil); callers re-raise it.
-function Interp:close_upvals(frame, level, errobj)
+-- `on_error`, if given, is a message handler applied to every error a __close
+-- raises (matching PUC's luaG_errormsg running the errfunc at each throw); its
+-- result becomes the new pending error before it is chained to the next close.
+function Interp:close_upvals(frame, level, errobj, on_error)
   local pending = errobj
   if frame.tbc and #frame.tbc > 0 then
     local base_n, base_d = #self.frames, self.depth
@@ -111,12 +121,15 @@ function Interp:close_upvals(frame, level, errobj)
             local saved_n = #self.frames
             local ok, err = pcall(self.call, self, h, args)
             if not ok then
+              -- the __close raised; run the message handler on it (as PUC does
+              -- at the throw point) BEFORE chaining to the next close
+              if on_error then err = on_error(err) end
               -- the __close raised; run the to-be-closed vars of any frames it
               -- left on the stack (its own nested closes), chaining the error
               for j = #self.frames, saved_n + 1, -1 do
                 local fr = self.frames[j]
                 if fr and not fr.native and fr.tbc and #fr.tbc > 0 then
-                  local ce = self:close_upvals(fr, 0, err)
+                  local ce = self:close_upvals(fr, 0, err, on_error)
                   if ce ~= nil then err = ce end
                 end
               end
@@ -295,6 +308,47 @@ function Interp:build_traceback(msg, level)
   return table.concat(out, "\n")
 end
 
+-- the standalone interpreter's message handler (lua.c msghandler): a string (or
+-- number, via lua_tostring) error passes through, a value with a string-valued
+-- __tostring uses that (no traceback), and anything else becomes
+-- "(error object is a TYPE value)"; a traceback is appended in the first two
+-- non-__tostring cases. Frames must still be intact when this is called.
+function Interp:default_msgh(rawval)
+  local msg
+  if type(rawval) == "string" then
+    msg = rawval
+  elseif type(rawval) == "number" then
+    msg = self:number_tostring(rawval)
+  else
+    local h = self:metamethod(rawval, "__tostring")
+    if h ~= nil then
+      local ok, r = pcall(self.call, self, h, { rawval, n = 1 })
+      if ok and type(r[1]) == "string" then return r[1] end
+    end
+    msg = "(error object is a " .. rt.typename(rawval) .. " value)"
+  end
+  return self:build_traceback(msg, 1)
+end
+
+-- apply the current message handler (errfunc) to a raw error value, with the
+-- VM frame stack still intact (so a traceback handler can inspect it). Mirrors
+-- PUC's luaG_errormsg: an active xpcall handler is invoked, the top-level
+-- DEFAULT runs the standalone msghandler, a CLEARED context (pcall) leaves the
+-- raw error untouched. Used by load(reader) for reader/parse-time errors.
+function Interp:apply_msgh(rawval)
+  local msgh = self.msgh
+  if rt.is_callable(msgh) then
+    local hok, hr = pcall(self.call, self, msgh, { rawval, n = 1 })
+    if not hok then return "error in error handling" end
+    local hv = hr[1]
+    if hv == nil then hv = "<no error object>" end
+    return hv
+  elseif msgh == self.MSGH_DEFAULT then
+    return self:default_msgh(rawval)
+  end
+  return rawval   -- CLEARED / none: preserve the raw error object
+end
+
 -- find the variable-name suffix for `value` among the registers recorded by
 -- the current op's error hint (used by arith/concat/len/unm error messages).
 function Interp:hint_for(value)
@@ -335,8 +389,9 @@ function Interp:call(fn, args)
       -- A native frame is a yield barrier (you can't yield across a C call)
       -- unless it's a yieldable C function (pcall/xpcall).
       local frames = self.frames
-      local nf = { native = true, fn = fn,
+      local nf = { native = true, fn = fn, callinfo = self.next_callinfo,
                    yieldable = self.yieldable_natives and self.yieldable_natives[fn] }
+      self.next_callinfo = nil
       frames[#frames + 1] = nf
       if self.hook and self.hook.call then self:fire_hook("call") end
       local res = fn(self, args)
@@ -351,7 +406,12 @@ function Interp:call(fn, args)
     else
       local h = self:metamethod(fn, "__call")
       if h == nil then
-        self:rt_error("attempt to call a " .. rt.typename(fn) .. " value")
+        local suffix = ""
+        local ci = self.next_callinfo
+        if ci and ci.what == "metamethod" then
+          suffix = " (metamethod '" .. ci.name .. "')"
+        end
+        self:rt_error("attempt to call a " .. rt.typename(fn) .. " value" .. suffix)
       end
       ccmt = ccmt + 1
       if ccmt > 15 then self:rt_error("'__call' chain too long") end
@@ -907,31 +967,43 @@ function Interp:protected(fn, args, handler)
   -- exactly this; give the whole error-handling section headroom.
   local saved_max = self.max_depth
   self.max_depth = saved_max + 200
-  -- run the message handler with the stack still intact (self.frames was not
-  -- popped on the error path), so a traceback handler can inspect it
-  local hresult
+  -- the message handler (errfunc). PUC runs it via luaG_errormsg at EACH throw
+  -- point: once for the original error, then again for every error a __close
+  -- raises during unwinding. Its result replaces the (chained) error object,
+  -- so a later __close sees the transformed value as its 2nd argument.
+  local transform
   if handler then
-    local hok, hr = pcall(self.call, self, handler, { errval(res), n = 1 })
-    -- if the message handler itself errors, Lua reports LUA_ERRERR
-    if hok then hresult = hr[1] else hresult = "error in error handling" end
-    -- a nil handler RESULT is subject to the nil-error-object rule too
-    if hok and hresult == nil then hresult = "<no error object>" end
+    transform = function(e)
+      local hok, hr = pcall(self.call, self, handler, { errval(e), n = 1 })
+      -- if the message handler itself errors, Lua reports LUA_ERRERR
+      if not hok then return "error in error handling" end
+      local hv = hr[1]
+      -- a nil handler RESULT is subject to the nil-error-object rule too
+      if hv == nil then hv = "<no error object>" end
+      return hv
+    end
   end
+  -- run the handler on the ORIGINAL error first, with the stack still intact
+  -- (self.frames was not popped on the error path) so a traceback handler can
+  -- inspect it. The transformed value is what the to-be-closed unwinding sees.
+  local pending = res
+  if transform then pending = transform(pending) end
   -- now unwind, running pending to-be-closed handlers (inner frames first); pop
-  -- each frame BEFORE running its handler so nested calls stay contiguous.
+  -- each frame BEFORE running its handler so nested calls stay contiguous. Each
+  -- __close error re-invokes the handler (via `transform`) and re-chains.
   while #self.frames > saved_n do
     local top = #self.frames
     local f = self.frames[top]
     self.frames[top] = nil
     if f and f.tbc and #f.tbc > 0 then
-      local cok, cerr = pcall(self.close_upvals, self, f, 0, res)
-      res = cerr
+      local cok, cerr = pcall(self.close_upvals, self, f, 0, pending, transform)
+      if cok then pending = cerr end
     end
   end
   self.depth = saved_depth
   self.max_depth = saved_max
-  if handler then return false, hresult end
-  return false, errval(res)
+  if handler then return false, pending end
+  return false, errval(pending)
 end
 
 return { Interp = Interp, rt = rt }

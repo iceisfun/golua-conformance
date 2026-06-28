@@ -256,11 +256,14 @@ function Interp:name_suffix(frame, reg)
   return ""
 end
 
--- name (namewhat, name) of frame i, as seen from its caller (getfuncname)
-function Interp:frame_name(i)
-  local f = self.frames[i]
+-- name (namewhat, name) of frame i, as seen from its caller (getfuncname).
+-- `frames` defaults to the running stack but may be another thread's saved
+-- stack (debug.getinfo/traceback with a coroutine argument).
+function Interp:frame_name(i, frames)
+  frames = frames or self.frames
+  local f = frames[i]
   if f.callinfo then return f.callinfo.what, f.callinfo.name end
-  local caller = self.frames[i - 1]
+  local caller = frames[i - 1]
   if caller and not caller.native and caller.proto then
     local ci = caller.proto.code[caller.savedpc]
     if ci and (ci.op == "CALL" or ci.op == "TAILCALL") then
@@ -271,9 +274,10 @@ function Interp:frame_name(i)
 end
 
 -- one traceback line for frame i (matches luaL_traceback formatting)
-function Interp:traceback_line(i)
-  local f = self.frames[i]
-  local what, name = self:frame_name(i)
+function Interp:traceback_line(i, frames)
+  frames = frames or self.frames
+  local f = frames[i]
+  local what, name = self:frame_name(i, frames)
   local namepart
   if what and name then namepart = what .. " '" .. name .. "'" end
   if f.native then
@@ -292,19 +296,24 @@ end
 
 -- build a stack traceback string (luaL_traceback). level 1 = caller of the
 -- traceback call (its own native frame is at the top of self.frames).
-function Interp:build_traceback(msg, level)
+-- `frames` defaults to the running stack; pass a coroutine's saved stack to
+-- trace it. `append_c_tail` adds the synthetic "[C]: in ?" bottom frame that
+-- represents the host that started the main chunk -- a coroutine's stack has
+-- no such frame (its body is the bottom), so callers pass false for threads.
+function Interp:build_traceback(msg, level, frames, append_c_tail)
+  frames = frames or self.frames
+  if append_c_tail == nil then append_c_tail = true end
   local out = {}
   if msg ~= nil then out[#out + 1] = msg end
   out[#out + 1] = "stack traceback:"
-  local frames = self.frames
   local top = #frames - (level or 1)
   -- a negative/out-of-range level must not index past the stack top (Lua's
   -- lua_getstack returns 0 there); clamp so we never deref a nil frame.
   if top > #frames then top = #frames end
   for i = top, 1, -1 do
-    out[#out + 1] = "\t" .. self:traceback_line(i)
+    out[#out + 1] = "\t" .. self:traceback_line(i, frames)
   end
-  out[#out + 1] = "\t[C]: in ?"
+  if append_c_tail then out[#out + 1] = "\t[C]: in ?" end
   return table.concat(out, "\n")
 end
 

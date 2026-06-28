@@ -105,6 +105,11 @@ local function opt_int(I, args, n, fname, def)
   return check_int(I, args, n, fname)
 end
 
+-- luaL_checkany: the argument must be present (any value, even nil/false)
+local function check_any(I, args, n, fname)
+  if n > args.n then argerror(I, n, fname, "value expected") end
+end
+
 local function check_func(I, args, n, fname)
   local v = args[n]
   if not rt.is_callable(v) then typeerror(I, n, fname, "function", args) end
@@ -1705,6 +1710,10 @@ local function install_coroutine(I)
     -- innermost first, chaining a new error if a __close raises.
     if not rr[1] then
       local errobj = rr[2]
+      -- snapshot the error-point stack: PUC keeps a dead-by-error coroutine's
+      -- call stack available to debug.traceback until it is resumed/closed.
+      local snapshot = {}
+      for i = 1, #I.frames do snapshot[i] = I.frames[i] end
       while #I.frames > 0 do
         local top = #I.frames
         local f = I.frames[top]
@@ -1719,6 +1728,13 @@ local function install_coroutine(I)
         end
       end
       rr[2] = errobj
+      -- preserve the error-point stack for debug.traceback (the live I.frames
+      -- was emptied by the to-be-closed unwind above).
+      th.errored_frames = snapshot
+      th.frames, th.depth = I.frames, I.depth
+      I.frames, I.depth = saved_frames, saved_depth
+      I.current_thread = saved_cur
+      return rr
     end
     th.frames, th.depth = I.frames, I.depth
     th.msgh = I.msgh                          -- persist the coroutine's errfunc
@@ -1885,19 +1901,21 @@ local function install_coroutine(I)
     end
   end
 
-  -- A shared proto for wrap's result: `function(...) return helper(th, ...) end`
-  -- with upvalue 1 = resume_helper and upvalue 2 = the thread. Making it a real
-  -- (GC-tracked) closure -- rather than a native function -- lets the GC collect
-  -- the wrapper (and its thread) and clear weak references to it, like Lua.
+  -- A shared proto for wrap's result: `function(...) return helper(th, ...) end`.
+  -- PUC's wrap closure has exactly ONE upvalue (the thread), so we keep nups=1:
+  -- resume_helper is held as a proto constant (loaded with LOADK), and the
+  -- thread is the sole upvalue. Making it a real (GC-tracked) closure -- rather
+  -- than a native function -- lets the GC collect the wrapper (and its thread)
+  -- and clear weak references to it, like Lua.
   local wrap_proto = {
     numparams = 0, is_vararg = true, maxstack = 8,
     source = "=[C]", chunkname = "=[C]", line = 0, lastline = 0,
-    consts = {}, protos = {}, locvars = {}, lines = { 0, 0, 0, 0 },
-    upvals = { { name = "(helper)", in_stack = false, index = 0 },
-               { name = "(thread)", in_stack = false, index = 1 } },
+    consts = { resume_helper }, protos = {}, locvars = {},
+    lines = { 0, 0, 0, 0, 0 },
+    upvals = { { name = "(thread)", in_stack = false, index = 0 } },
     code = {
-      { op = "GETUPVAL", a = 0, b = 1 },   -- R0 = resume_helper
-      { op = "GETUPVAL", a = 1, b = 2 },   -- R1 = thread
+      { op = "LOADK",    a = 0, b = 1 },   -- R0 = resume_helper (const 1)
+      { op = "GETUPVAL", a = 1, b = 1 },   -- R1 = thread (upvalue 1)
       { op = "VARARG",   a = 2, b = 0 },   -- R2.. = varargs
       { op = "TAILCALL", a = 0, b = 0, c = 0 },  -- return R0(R1, ...)
       { op = "RETURN",   a = 0, b = 1 },
@@ -1908,7 +1926,6 @@ local function install_coroutine(I)
     local f = check_func(I, args, 1, "wrap")
     local th = new_thread(f)
     return R(rt.new_closure(wrap_proto, {
-      { closed = true, val = resume_helper },
       { closed = true, val = th },
     }))
   end)
@@ -1940,34 +1957,56 @@ local function install_debug(I)
   def("traceback", function(I, args)
     -- debug.traceback([thread,] [message [, level]])
     local idx = 1
-    if rt.is_thread(args[1]) then idx = 2 end
+    local th
+    if rt.is_thread(args[1]) then idx = 2; th = args[1] end
     local msg = args[idx]
     if msg ~= nil and type(msg) ~= "string" and type(msg) ~= "number" then
       return R(msg)   -- non-string/number message: returned unchanged
     end
-    local level = opt_int(I, args, idx + 1, "traceback", 1)
-    -- level 1 = caller of traceback (build_traceback starts at #frames - level,
-    -- which skips traceback's own native frame at the top)
-    return R(I:build_traceback(msg, level))
+    -- the running thread's stack has traceback's own native frame on top, so
+    -- its default level is 1 (skip it); a coroutine target's saved stack does
+    -- not, so its default level is 0 (start at its topmost frame).
+    local frames, append_c, default_level
+    if th ~= nil and not th.main and th ~= I.current_thread then
+      frames = th.errored_frames or th.frames or {}
+      append_c = false           -- a coroutine stack has no host bottom frame
+      default_level = 0
+    else
+      frames = I.frames
+      append_c = true
+      default_level = 1
+    end
+    local level = opt_int(I, args, idx + 1, "traceback", default_level)
+    return R(I:build_traceback(msg, level, frames, append_c))
   end)
 
   def("getinfo", function(I, args)
     local idx = 1
-    if rt.is_thread(args[1]) then idx = 2 end
+    local th
+    if rt.is_thread(args[1]) then idx = 2; th = args[1] end
     local f = args[idx]
-    local what = args[idx + 1] or "flnSrtu"   -- Lua's default (all but L)
-    for i = 1, #what do
-      if not ("nSltufLr"):find(what:sub(i, i), 1, true) then
-        argerror(I, idx + 1, "getinfo", "invalid option")
-      end
+    -- options (arg idx+1) are validated as a string first (luaL_optstring),
+    -- before the level/function argument is coerced.
+    local what
+    if args[idx + 1] == nil then
+      what = "flnSrtu"                       -- Lua's default (all but L)
+    else
+      what = check_str(I, args, idx + 1, "getinfo")
+    end
+    -- a suspended coroutine target uses its own saved stack; the main thread or
+    -- the currently running thread uses the live stack.
+    local frames = I.frames
+    if th ~= nil and not th.main and th ~= I.current_thread then
+      frames = th.errored_frames or th.frames or {}
     end
     local info = rt.new_table()
     local h = info.hash
     local theproto, thefunc, theframe
     if type(f) == "number" then
-      -- level: 1 = caller of getinfo
-      local level = rt.toint(f)
-      local frame = I.frames[#I.frames - level]
+      -- level: 1 = caller of getinfo (running thread); 0 = topmost frame of a
+      -- coroutine target. A non-integer level is rejected here.
+      local level = check_int(I, args, idx, "getinfo")
+      local frame = frames[#frames - level]
       if frame == nil then return R(nil) end
       theframe = frame
       thefunc = frame.cl or frame.fn
@@ -1993,7 +2032,7 @@ local function install_debug(I)
       -- caller's call instruction) -- same as getfuncname/frame_name
       if what:find("n", 1, true) then
         h["namewhat"] = ""
-        local kind, nm = I:frame_name(#I.frames - level)
+        local kind, nm = I:frame_name(#frames - level, frames)
         if kind and nm then h["name"] = nm; h["namewhat"] = kind end
       end
     elseif rt.is_closure(f) then
@@ -2015,10 +2054,24 @@ local function install_debug(I)
       h["linedefined"] = -1; h["lastlinedefined"] = -1
       h["nparams"] = 0; h["nups"] = 0; h["isvararg"] = true
     else
-      argerror(I, idx, "getinfo", "function or level expected")
+      -- not a function: PUC takes it as a level and runs luaL_checkinteger,
+      -- yielding "number expected, got <type>" at this position.
+      check_int(I, args, idx, "getinfo")
+      return R(nil)
+    end
+    -- invalid option characters are reported only after the level/function
+    -- argument has been validated (matches db_getinfo's lua_getinfo call).
+    for i = 1, #what do
+      if not ("nSltufLr"):find(what:sub(i, i), 1, true) then
+        argerror(I, idx + 1, "getinfo", "invalid option")
+      end
     end
     -- "n": closures/C funcs queried directly have no call-site name
     if what:find("n", 1, true) and h["namewhat"] == nil then h["namewhat"] = "" end
+    -- "r": transfer info. Outside an active hook these are always 0/0.
+    if what:find("r", 1, true) then
+      h["ftransfer"] = 0; h["ntransfer"] = 0
+    end
     -- "f": the function itself
     if what:find("f", 1, true) and thefunc ~= nil then h["func"] = thefunc end
     -- "L": active lines (lines that have code)
@@ -2045,45 +2098,69 @@ local function install_debug(I)
     return R(info)
   end)
 
-  def("getlocal", function(I, args)
-    local idx = 1
-    if rt.is_thread(args[1]) then idx = 2 end
-    local level = check_int(I, args, idx, "getlocal")
-    local n = check_int(I, args, idx + 1, "getlocal")
-    local frame = I.frames[#I.frames - level]
-    if frame == nil or frame.native or not frame.proto then return R(nil) end
-    -- find n-th local active at current pc
+  -- the n-th local active at `pc` in a closure proto (luaF_getlocalname)
+  local function nth_local(proto, n, pc)
     local count = 0
-    for _, lv in ipairs(frame.proto.locvars) do
-      if lv.startpc <= frame.savedpc and (lv.endpc == nil or frame.savedpc < lv.endpc) then
+    for _, lv in ipairs(proto.locvars) do
+      if lv.startpc <= pc and (lv.endpc == nil or pc < lv.endpc) then
         count = count + 1
-        if count == n then
-          return R(lv.name, frame.R[lv.reg])
-        end
+        if count == n then return lv end
       end
     end
-    return R(nil)
+    return nil
+  end
+
+  -- saved stack of a suspended coroutine, else the live stack
+  local function target_frames(I, th)
+    if th ~= nil and not th.main and th ~= I.current_thread then
+      return th.errored_frames or th.frames or {}
+    end
+    return I.frames
+  end
+
+  def("getlocal", function(I, args)
+    -- db_getlocal: nvar (arg idx+1) is checked first, then the function/level
+    local idx = 1
+    local th
+    if rt.is_thread(args[1]) then idx = 2; th = args[1] end
+    local n = check_int(I, args, idx + 1, "getlocal")
+    local f = args[idx]
+    if rt.is_closure(f) then
+      -- function form: name of the n-th parameter (no value); nil if none
+      local lv = nth_local(f.proto, n, 1)
+      return R(lv and lv.name)        -- single value, name or nil
+    elseif type(f) == "function" then
+      return R(nil)                   -- C function: no introspectable locals
+    end
+    local level = check_int(I, args, idx, "getlocal")
+    local frames = target_frames(I, th)
+    local frame = frames[#frames - level]
+    if frame == nil then return R(nil) end
+    if frame.native or not frame.proto then return R(nil) end
+    local lv = nth_local(frame.proto, n, frame.savedpc)
+    if lv == nil then return R(nil) end
+    return R(lv.name, frame.R[lv.reg])
   end)
 
   def("setlocal", function(I, args)
+    -- db_setlocal: level then nvar are coerced, then the value must be present
     local idx = 1
-    if rt.is_thread(args[1]) then idx = 2 end
+    local th
+    if rt.is_thread(args[1]) then idx = 2; th = args[1] end
     local level = check_int(I, args, idx, "setlocal")
     local n = check_int(I, args, idx + 1, "setlocal")
+    local frames = target_frames(I, th)
+    local frame = frames[#frames - level]
+    if frame == nil then return R(nil) end
+    check_any(I, args, idx + 2, "setlocal")   -- value expected
     local value = args[idx + 2]
-    local frame = I.frames[#I.frames - level]
-    if frame == nil or frame.native or not frame.proto then return R(nil) end
-    local count = 0
-    for _, lv in ipairs(frame.proto.locvars) do
-      if lv.startpc <= frame.savedpc and (lv.endpc == nil or frame.savedpc < lv.endpc) then
-        count = count + 1
-        if count == n then
-          frame.R[lv.reg] = value
-          return R(lv.name)
-        end
-      end
-    end
-    return R(nil)
+    -- a C frame slot: PUC's lua_setlocal reports a generic "(C temporary)"
+    if frame.native then return R("(C temporary)") end
+    if not frame.proto then return R(nil) end
+    local lv = nth_local(frame.proto, n, frame.savedpc)
+    if lv == nil then return R(nil) end
+    frame.R[lv.reg] = value
+    return R(lv.name)
   end)
 
   def("getupvalue", function(I, args)
@@ -2099,6 +2176,8 @@ local function install_debug(I)
   end)
 
   def("setupvalue", function(I, args)
+    -- db_setupvalue: the new value (arg 3) must be present before anything else
+    check_any(I, args, 3, "setupvalue")
     local f = args[1]
     local n = check_int(I, args, 2, "setupvalue")
     local v = args[3]
@@ -2152,11 +2231,13 @@ local function install_debug(I)
     -- like Lua's checkupval: each function must be a Lua closure and each index
     -- must be in range, else a (catchable) error
     local function checkupval(fidx, nidx)
+      -- PUC checkupval coerces the index (luaL_checkinteger) BEFORE checking
+      -- that the function argument is a Lua closure.
+      local n = check_int(I, args, nidx, "upvaluejoin")
       local f = args[fidx]
       if not rt.is_closure(f) then
         argerror(I, fidx, "upvaluejoin", "Lua function expected")
       end
-      local n = check_int(I, args, nidx, "upvaluejoin")
       if n < 1 or n > #f.upvals then
         argerror(I, nidx, "upvaluejoin", "invalid upvalue index")
       end
@@ -2175,17 +2256,21 @@ local function install_debug(I)
     local fn = args[idx]
     local hook
     if fn ~= nil then
-      local mask = args[idx + 1]
-      if type(mask) ~= "string" then mask = "" end
+      -- db_sethook: validate mask(string) at idx+1, then fn(function) at idx,
+      -- then count(integer) at idx+2 -- in that order.
+      local mask = check_str(I, args, idx + 1, "sethook")
+      if not rt.is_callable(fn) then typeerror(I, idx, "sethook", "function", args) end
       local count = opt_int(I, args, idx + 2, "sethook", 0)
-      hook = {
-        fn = fn,
-        call = mask:find("c", 1, true) ~= nil,
-        ret = mask:find("r", 1, true) ~= nil,
-        line = mask:find("l", 1, true) ~= nil,
-        count = (count > 0) and count or nil,
-        mask = mask,
-      }
+      local call = mask:find("c", 1, true) ~= nil
+      local ret  = mask:find("r", 1, true) ~= nil
+      local line = mask:find("l", 1, true) ~= nil
+      count = (count > 0) and count or nil
+      -- an empty effective mask (no c/r/l) with no count clears the hook, just
+      -- like lua_sethook collapsing mask==0 to "no hook".
+      if call or ret or line or count then
+        hook = { fn = fn, call = call, ret = ret, line = line,
+                 count = count, mask = mask }
+      end
     end
     th.hook = hook
     -- if the target is the thread that is currently executing, apply it now
